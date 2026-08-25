@@ -1,335 +1,571 @@
 BIATH CONTROL CENTER - CONTEXTE DU PROJET
 ============================================
 
+Ce fichier a ete entierement reecrit le 25/08/2026 pour refleter l'etat reel
+du projet apres une premiere phase de developpement. Il remplace la version
+initiale (qui decrivait un projet vide, au stade de conception).
+
+
 1. OBJECTIF DU PROJET
 ----------------------
 
 Biath Control Center est un logiciel de controle pour piloter les habillages
 televisuels pendant une course de biathlon.
 
-Le logiciel doit permettre a un operateur de suivre les donnees de la course et
-de declencher les habillages graphiques dans CasparCG de maniere rapide,
-fiable et comprehensible pendant une diffusion en direct.
+Le logiciel permet a un operateur de suivre les donnees de la course en
+temps reel et de declencher les habillages graphiques dans CasparCG de
+maniere rapide, fiable et comprehensible pendant une diffusion en direct.
 
-Un logiciel distinct existe deja. Il genere et diffuse les donnees de la course
-de biathlon. Le present projet ne doit pas remplacer ce logiciel de donnees :
-il doit principalement consommer ses donnees et piloter les graphiques.
+Un logiciel distinct (deja existant, non modifie par ce projet) genere et
+diffuse les donnees de la course de biathlon via WebSocket. Biath Control
+Center consomme ces donnees et pilote CasparCG ; il ne remplace pas le
+logiciel de donnees.
+
 
 2. ETAT ACTUEL DU REPO
 ----------------------
 
-Le repository contient actuellement les fichiers suivants :
+Fichiers principaux :
 
-- main.py : point d'entree envisage de l'application, actuellement vide.
-- biath_data.py : module reserve a la reception et a la gestion des donnees
-  du logiciel de course, actuellement vide.
-- casparcg.py : module reserve a la communication avec CasparCG, actuellement
-  vide.
+- main.py
+    Point d'entree. Cree les instances globales `caspar` (CasparCG) et
+    `data` (BiathDataWebsocket), declare la page NiceGUI ("/"), appelle
+    build_header() et build_body(), connecte caspar/data au demarrage du
+    serveur (@app.on_startup), lance ui.run().
 
-Le projet est au tout debut de sa conception. Ne pas supposer qu'une logique
-existante est deja implementee dans ces fichiers.
+- casparcg.py
+    Couche de communication AMCP avec CasparCG. Implementation maison
+    (pas de librairie tierce) : ouverture de socket TCP brut, envoi de
+    commandes texte, parsing des reponses selon le protocole AMCP.
+    Contient la classe CasparCG et le dataclass AMCPResponse.
 
-3. TECHNOLOGIES ENVISAGEES
+- biathdata_ws.py
+    Couche de communication WebSocket avec le logiciel de donnees
+    biathlon. Utilise la librairie tierce `websockets` (contrairement a
+    casparcg.py, le protocole WebSocket est trop complexe/risque a
+    reimplementer a la main). Contient la classe BiathDataWebsocket.
+
+- interface.py
+    Construction de l'interface NiceGUI : barre d'outils du haut
+    (build_header) et corps de page (build_body). Ne contient aucune
+    logique bas niveau AMCP/WebSocket, uniquement de l'affichage et des
+    appels aux methodes publiques de CasparCG/BiathDataWebsocket.
+
+- scene_button.py
+    Classe SceneButton : brique reutilisable representant un graphique
+    CasparCG pilotable (play preview/programme, take, stop, pages
+    multiples, saisie de dossard, saisie de valeur target, envoi
+    automatique de l'ip du websocket). C'est le mecanisme prevu pour
+    ajouter facilement de nouveaux graphiques a l'interface.
+
+- biathdata_reference.txt
+    Documentation de reference de tous les champs disponibles dans un
+    message de chronometrage recu via le WebSocket (config, event_infos,
+    timing_data), avec leur variable d'acces Python exacte. Genere a
+    partir d'un exemple reel fourni par l'utilisateur.
+
+- assets/foxxprod_logo.png
+    Logo affiche dans la barre d'outils.
+
+- biath_data.py
+    Fichier historique vide, non utilise. La logique WebSocket vit en
+    realite dans biathdata_ws.py (renomme/reoriente en cours de route).
+    A supprimer ou fusionner si confirme inutile.
+
+Version de Python utilisee en developpement : 3.13 (Python313, observe
+dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
+
+
+3. TECHNOLOGIES CONFIRMEES
 ---------------------------
 
-Langage principal : Python.
+- Python (3.13 en dev).
+- NiceGUI pour l'interface operateur (confirme et utilise).
+- asyncio pour tout le code reseau et les taches de fond (reconnexion,
+  ping, retrait automatique de graphiques...).
+- Client AMCP : implementation interne maison sur socket TCP brut (pas de
+  librairie tierce). Choix assume : protocole texte simple, controle total
+  du comportement (timeouts, reconnexion), pas de dependance externe a
+  maintenir pour un usage broadcast en direct.
+- Client WebSocket : librairie tierce `websockets` (pip install websockets).
+  Choix assume different d'AMCP : le protocole WebSocket (handshake HTTP
+  Upgrade, framing, masking, ping/pong de controle) est trop complexe et
+  risque a reimplementer correctement a la main.
+- Aucune API web publique construite par-dessus NiceGUI : NiceGUI gere la
+  communication navigateur <-> serveur en interne.
 
-Interface envisagee : NiceGUI.
 
-NiceGUI est privilegie afin de construire une interface web principalement en
-Python, sans devoir developper manuellement une API REST, du HTML, du CSS et du
-JavaScript pour chaque ecran. NiceGUI utilise des composants web et gere la
-communication necessaire en interne.
+4. CASPARCG.PY - DETAIL DE L'IMPLEMENTATION
+---------------------------------------------
 
-La solution doit rester une application de controle locale ou reseau, et non
-un site marketing ou une application publique.
+4.1 AMCPResponse (dataclass)
+    - code: int, message: str, data: list[str]
+    - is_info      -> 100 <= code < 200
+    - is_success    -> 200 <= code < 400
+    - is_error      -> code == 0 (erreur locale/reseau) ou code >= 400
 
-Technologies a etudier et valider :
+4.2 Classe CasparCG - constructeur
+    CasparCG(ip, port, channel_programm, channel_preview, timeout=5.0,
+             reconnect=True, reconnect_delay=5.0)
+    channel_programm/channel_preview DOIVENT correspondre aux channels
+    reellement definis dans le casparcg.config du serveur CasparCG cible
+    (voir section 7, un mismatch a deja cause une erreur "Invalid channel
+    specified").
 
-- NiceGUI pour l'interface operateur.
-- asyncio pour les traitements temps reel et les connexions non bloquantes.
-- Client WebSocket Python pour recevoir les donnees du logiciel de course.
-- Client AMCP Python ou couche AMCP interne pour envoyer les commandes a
-  CasparCG.
-- Un systeme de configuration pour declarer les templates graphiques.
+    Etat interne : reader/writer asyncio, connected (bool), _lock
+    (asyncio.Lock, serialise les commandes), _preview (dict, dernier
+    template/data/cg_layer/play_on_load envoye en preview), _ping_interval
+    (5.0s), _ping_task, _remove_delay (5.0s), _pending_removals (dict
+    (address, cg_layer) -> Task, pour l'auto-remove differe apres stop()).
 
-Important : ne pas construire une API web publique uniquement par habitude.
-L'objectif est que NiceGUI masque la plus grande partie de cette complexite.
-Il restera toutefois des communications techniques internes : WebSocket avec
-le logiciel de donnees et AMCP avec CasparCG.
+4.3 Fonctions internes/techniques (prefixees _, ou non destinees a un
+    usage direct depuis le reste du logiciel) :
+    - ping() : envoie "PING\r\n", compare la reponse brute a "PONG" (PING
+      est un cas special du protocole AMCP, il ne suit PAS le format
+      "XXX message" standard), met a jour self.connected.
+    - _ping_loop() : boucle unique de fond. Si connecte -> attend
+      ping_interval puis ping(). Si deconnecte et self.reconnect ->
+      attend reconnect_delay puis _reconnect(). Sinon, arrete la boucle.
+      Sequentiel : jamais deux tentatives de reconnexion en parallele.
+    - _reconnect() : ferme l'ancienne connexion si presente, en ouvre une
+      nouvelle, appelle ping().
+    - send_command(command) : envoie une commande AMCP brute, retourne un
+      AMCPResponse. Retourne code=0 "Not connected" si non connecte.
+    - _read_response() : parse une reponse (code + message), et pour les
+      reponses multi-lignes (code 200), continue de lire jusqu'a une
+      ligne vide terminale.
+    - _channel_number(channel) : "prw" -> channel_preview, "pgm" ->
+      channel_programm, sinon ValueError.
+    - format_address(channel, layer=None) : "prw" -> toujours
+      "{channel_preview}-1" (layer ignore, force a 1). "pgm" -> exige un
+      layer explicite (ValueError sinon).
+    - _escape_amcp_string(value) / _escape_xml(value) : echappement pour
+      parametres AMCP entre guillemets et pour attributs XML.
+    - format_template_data(data: dict) : convertit un dict cle/valeur en
+      XML CasparCG classique :
+        <templateData><componentData id="CLE"><data id="text"
+        value="VALEUR"/></componentData>...</templateData>
+      CONFIRME avec un exemple XML reel fourni par l'utilisateur. Les
+      cles du dict correspondent aux VRAIS noms de champs du template
+      (pas de convention generique f0/f1) : chaque template a ses propres
+      noms de champs.
+    - _schedule_remove(...) / _delayed_remove(...) : programment un
+      CG REMOVE automatique remove_delay secondes apres un stop(), annule
+      si un nouveau graphique est charge sur le meme (channel-layer,
+      cg_layer) avant l'echeance.
 
-4. FLUX GENERAL DES DONNEES
----------------------------
+4.4 Fonctions publiques (a utiliser depuis le reste du logiciel) :
+    - connect() : ouvre la connexion TCP, verifie via PING/PONG, DEMARRE
+      TOUJOURS la boucle de fond _ping_loop meme si cette premiere
+      tentative echoue (pour que CasparCG indisponible au demarrage soit
+      retente automatiquement au lieu d'abandonner). Retourne None ou un
+      message d'erreur.
+    - disconnect() : envoie BYE (sur, car on est toujours en connexion
+      distante/reseau, jamais en console locale CasparCG - BYE ne fait
+      donc que deconnecter, il n'eteint pas le serveur) puis ferme le
+      socket. Annule _ping_task et toutes les taches _pending_removals.
+    - play_template(channel, template, data=None, layer=None, cg_layer=1,
+      play_on_load=True) : construit et envoie CG ADD. Si succes, annule
+      tout auto-remove programme pour ce (channel-layer, cg_layer), et si
+      channel=="prw", memorise l'etat dans self._preview.
+    - update_template(channel, data, layer=None, cg_layer=1) : CG UPDATE.
+      Met a jour self._preview["data"] si c'est la preview qui est mise a
+      jour avec succes.
+    - remove_template(channel, layer=None, cg_layer=1) : CG REMOVE
+      (retire completement le producer, contrairement a stop()).
+    - stop(channel, layer=None, cg_layer=1) : CG STOP, puis programme un
+      CG REMOVE automatique 5s plus tard (annulable, voir 4.3).
+    - clear(channel, layer=None) : CLEAR generique (retire N'IMPORTE quel
+      producer, video/image/graphique, pas seulement les templates CG).
+      Si layer est omis, clear tout le channel. Reinitialise self._preview
+      si c'est la preview qui est cleared avec succes.
+    - play_prw_to_pgm(layer) : le "Take". Rejoue (recopie la commande et
+      les donnees, choix assume plutot que cloner une composition deja
+      preparee) le template/data actuellement memorise en preview vers le
+      programme au layer donne, puis stoppe la preview. Retourne une
+      erreur "Nothing in preview to take" si rien n'a ete joue en preview
+      au prealable (ou si le dernier play a echoue).
+    - emergency_all_out() : clear("prw") + clear("pgm"), retourne les deux
+      AMCPResponse. Vide integralement les deux channels (tout producer,
+      y compris les graphiques).
 
-Le logiciel de donnees de biathlon diffuse les informations via WebSocket.
+4.5 Rappels de protocole AMCP (source : wiki AMCP CasparCG, la doc note
+    elle-meme qu'elle peut etre datee, a re-verifier avec
+    casparcg.com/docs/wiki si besoin) :
+    - Reponses : code 3 chiffres + message. 100-101 info. 200-202 succes
+      (200 = multi-lignes terminees par une ligne vide, 201/202 = une
+      seule ligne). 400-404 erreur client. 500-503 erreur serveur.
+    - Encodage UTF-8, terminaison de commande "\r\n".
+    - Parametres avec espaces entre guillemets, echappement \" et \\.
+    - Adressage channel-layer : "1" (tout le channel), "1-1", "1-10",
+      "-0" (layer par defaut).
+    - CG ADD [layer] "template" [play-on-load 0/1] {"data"}
+    - CG UPDATE [cg_layer] "data"
+    - CG REMOVE [cg_layer]
+    - CG STOP [cg_layer]
+    - CG CLEAR (sans cg_layer, ne retire que les templates CG)
+    - CLEAR (generique, retire tout producer)
+    - BYE deconnecte a distance / eteint le serveur en local.
 
-Flux prevu :
 
-    Logiciel de donnees biathlon
-              |
-              | WebSocket
-              v
-    Biath Control Center
-       |                 |
-       |                 +--> Affichage des informations dans l'interface
-       |
-       +--> Commandes CasparCG via AMCP
-                         |
-                         +--> Channel preview
-                         +--> Channel programme
+5. BIATHDATA_WS.PY - DETAIL DE L'IMPLEMENTATION
+--------------------------------------------------
 
-Les fichiers HTML des graphiques ne recoivent pas directement les donnees
-injectees par Biath Control Center.
+5.1 Classe BiathDataWebsocket - constructeur
+    BiathDataWebsocket(ip, port, path="/", timeout=5.0, reconnect=True,
+                        reconnect_delay=5.0)
+    url (property) = f"ws://{ip}:{port}{path}"
 
-Chaque fichier HTML graphique se connecte lui-meme au serveur WebSocket du
-logiciel de donnees et recupere les donnees dont il a besoin.
+    Etat expose : latest_data (dict JSON brut du dernier message de
+    chronometrage complet), config (SimpleNamespace), event_infos
+    (SimpleNamespace), timing_data (dict[str, SimpleNamespace] cle =
+    dossard), connected (bool).
 
-En revanche, Biath Control Center doit transmettre de nombreux parametres au
-template CasparCG afin de lui indiquer notamment :
+5.2 Fonctions publiques :
+    - connect() : ouvre la connexion websocket, DEMARRE TOUJOURS la
+      boucle de fond _receive_loop meme si la premiere tentative echoue
+      (meme logique que CasparCG.connect(), pour retenter automatiquement
+      un serveur de donnees indisponible au demarrage).
+    - disconnect() : annule _receive_task, ferme la connexion.
+    - change_ip(ip, port=None) : met a jour l'adresse ; si deja connecte,
+      se deconnecte puis se reconnecte a la nouvelle adresse.
 
-- l'adresse IP du serveur de donnees WebSocket ;
-- le port du serveur WebSocket ;
-- le dossard ou l'identifiant de l'athlete concerne ;
-- la page graphique a afficher ;
-- le contexte de course ;
-- les autres parametres propres au template.
+5.3 Fonctions internes :
+    - _receive_loop() : boucle unique de fond, meme principe que
+      _ping_loop de CasparCG. Si connecte, consomme les messages
+      (async for) jusqu'a perte de connexion. Si deconnecte et
+      self.reconnect, attend reconnect_delay puis _reconnect(). Jamais
+      deux tentatives en parallele.
+    - _reconnect() : ferme l'ancien websocket si present, en ouvre un
+      nouveau.
+    - _handle_message(raw_message) :
+        1. json.loads(raw_message). PARTICULARITE DECOUVERTE EN TEST : le
+           serveur encode parfois le JSON DEUX FOIS (le message recu est
+           une string JSON qui contient elle-meme du JSON en texte
+           echappe). Le code detecte ce cas (resultat = str) et refait un
+           second json.loads.
+        2. Si le dict resultant contient les cles "config", "event_infos"
+           ET "timing_data", c'est un snapshot COMPLET de chronometrage
+           (pas un delta) : latest_data, config, event_infos et
+           timing_data sont remplaces integralement.
+        3. D'AUTRES TYPES DE MESSAGES passent sur le meme WebSocket
+           (confirme par l'utilisateur) mais ne sont PAS encore geres :
+           ils sont ignores silencieusement pour l'instant. A implementer
+           plus tard.
+    - _sanitize_key(key) : remplace tout caractere non valide pour un
+      attribut Python (ex: espace) par "_". Necessaire car le JSON reel
+      contient au moins une cle avec espace : "EVENT NAME" ->
+      accessible via event_infos.EVENT_NAME.
+    - _to_namespace(data: dict) : convertit un dict en SimpleNamespace en
+      assainissant les cles.
 
-Le format exact des donnees WebSocket sera fourni ulterieurement. Toute
-implementation de parsing doit donc etre concue pour pouvoir etre adaptee
-sans modifier toute l'interface.
+5.4 Format reel des messages WebSocket : voir biathdata_reference.txt
+    pour le detail complet champ par champ. Points cles :
+    - Chaque message de chronometrage contient un etat COMPLET (pas un
+      delta), a remplacer integralement a chaque reception.
+    - timing_data est indexe par dossard (string), ex: "1", "2"...
+    - Les noms de champs (C_NUM, C_LAST_NAME, C_TIME, C_STATUS,
+      C_INTERSHOOT1..8, C_INTERSLOPE1..12, etc.) sont documentes dans
+      biathdata_reference.txt avec leur variable d'acces exacte.
+    - C_START et les C_INTER... sont TRES PROBABLEMENT en millisecondes
+      depuis minuit (deduit, pas confirme par le fournisseur).
+    - VOLADBNUMBER et C_SHOOTING_RACE_NUMBER : signification non
+      identifiee avec certitude.
 
-5. CASPARCG
------------
 
-CasparCG est le moteur graphique utilise par le projet.
+6. INTERFACE.PY - DETAIL DE L'IMPLEMENTATION
+-----------------------------------------------
 
-Le logiciel doit pouvoir piloter au minimum deux channels CasparCG :
+6.1 build_header(caspar, data)
+    Barre d'outils fixe en haut de page (ui.header), style sombre
+    (bg-slate-900), avec marge (m-3) et coins arrondis sur les 4 cotes
+    (rounded-2xl, overflow-hidden pour que les elements colles respectent
+    l'arrondi).
 
-- un channel de preview ;
-- un channel de programme / diffusion.
+    Contenu, de gauche a droite :
+    - Logo (assets/foxxprod_logo.png, dimensions fixes h-10 w-16).
+    - Panneau blanc "flush" (pleine hauteur du header, sans bordure ni
+      arrondi individuel) avec le titre du logiciel "BIATHLON - CONTROL
+      CENTER".
+    - Titre de l'epreuve (data.event_infos.TITLE) et nom de la course
+      (data.event_infos.EVENT_NAME, en gras), meme taille de police,
+      separes par un tiret.
+    - Bouton "EMERGENCY ALL OUT" (contour rouge, fond rouge legerement
+      transparent bg-red-600/20, icone warning) : appelle
+      caspar.emergency_all_out() et notifie le resultat.
+    - Case de statut CASPARCG et case de statut WS DATA (fonction
+      _build_status_box) : chaque case fait moitie haut (titre) / moitie
+      bas (statut colore, fond legerement transparent, clignote lentement
+      - animate-pulse - si deconnecte), largeur fixe identique (w-32),
+      collees entre elles (bordure gauche fine, pas de marge).
+    - Cases HEURE et TEMPS COURSE (fonction _build_clock_box) : fond
+      blanc, cote a cote, heure actuelle et decompte/chrono de course
+      (calcule depuis event_infos.STARTHOUR par format_race_clock).
 
-Workflow attendu pour les actions graphiques :
+    Tout se rafraichit chaque seconde via ui.timer(1.0, update_header).
+    Le fond de la PAGE (pas du header) est regle via
+    ui.query("body").classes(replace="bg-slate-50") (blanc legerement
+    casse).
 
-1. L'operateur choisit une action, une page ou un athlete.
-2. Le template est charge dans le channel de preview.
-3. L'operateur verifie le resultat dans l'interface ou la sortie preview.
-4. L'operateur declenche un Take.
-5. Le template ou l'etat prepare est envoye vers le channel programme.
+6.2 build_body(caspar, data)
+    Corps de page. Contient actuellement un unique SceneButton de test
+    (template "test", layer=20, send_ip/bib_on/multipage_on/target_on
+    tous actives) - a etoffer avec les vrais boutons/templates de la V1.
 
-Le comportement exact du transfert preview vers programme doit etre precise.
-Il faudra notamment decider si le Take doit :
+6.3 Points d'architecture NiceGUI importants (voir aussi section 8) :
+    - build_header/build_body sont appeles depuis une fonction decoree
+      @ui.page("/") dans main.py, PAS au niveau module. C'est une
+      correction critique (voir section 8.5).
 
-- recopier la commande et ses parametres sur le channel programme ;
-- cloner ou commuter une composition deja preparee ;
-- arreter l'ancien graphique avant d'envoyer le nouveau ;
-- conserver ou non les animations et leur etat temporel.
 
-La couche CasparCG devra gerer au minimum :
+7. SCENE_BUTTON.PY - DETAIL DE L'IMPLEMENTATION
+----------------------------------------------------
 
-- connexion et deconnexion AMCP ;
-- verification de l'etat de la connexion ;
-- chargement d'un template ;
-- envoi des arguments au template ;
-- Play, Stop, Clear et Remove selon les besoins ;
-- mise a jour de proprietes ou de donnees ;
-- preview ;
-- Take vers programme ;
-- remontee des erreurs et des reponses CasparCG ;
-- journalisation des commandes importantes.
+Classe SceneButton : represente un graphique CasparCG pilotable. Concu
+comme LE moyen d'ajouter facilement un nouveau graphique a l'interface et
+de controler les donnees qui lui sont envoyees.
 
-La version de CasparCG, les ports AMCP et la configuration exacte des channels
-restent a confirmer.
+Constructeur :
+    SceneButton(caspar, data, label, template, layer, cg_layer=1,
+                extra_data=None,
+                send_ip=False, field_ip="ip",
+                bib_on=False, field_bib="bib",
+                multipage_on=False, field_page="page",
+                target_on=False, field_target="target")
 
-6. INTERFACE OPERATEUR
-----------------------
+    Les noms de champs (field_ip, field_bib, field_page, field_target)
+    sont CONFIGURABLES par bouton (chaque template CasparCG peut avoir
+    ses propres noms de champs), SAUF que la VALEUR du champ ip est
+    toujours automatiquement celle du serveur websocket (data.ip), non
+    saisie par l'operateur. send_ip n'envoie que l'IP, pas le port.
 
-L'interface doit etre une interface de regie, concue pour une utilisation
-pendant une course en direct.
+Comportement au clic (corps du bouton, forme pilule rounded-full comme
+le bouton EMERGENCY) :
+    - etat "idle"      -> clic = play_template vers preview
+    - etat "preview"   -> clic = play_prw_to_pgm (Take vers programme)
+    - etat "programme" -> clic sans effet (protection contre un replay
+      accidentel d'un graphique en direct ; seul le survol "OUT" peut
+      l'arreter)
 
-Elle doit privilegier :
+Survol : un petit rectangle apparait directement au-dessus du bouton
+(colle, sans espace mort, pour rester cliquable en y deplacant la
+souris), fond noir/gris fonce (bg-slate-800) :
+    - "IN"  (idle/preview) -> clic = envoi DIRECT au programme (sans
+      passer par la preview)
+    - "OUT" (programme)    -> clic = stop() du graphique
 
-- la rapidite d'action ;
-- la lisibilite ;
-- la visibilite de l'etat preview et programme ;
-- des boutons clairement associes aux templates et aux actions ;
-- la prevention des erreurs de manipulation ;
-- un retour immediat en cas d'erreur CasparCG ou de perte du WebSocket ;
-- l'affichage des donnees de course recues en temps reel.
+Multipage (multipage_on=True) : fleches gauche/droite integrees dans le
+corps du bouton (chevron_left/chevron_right). Le compteur "page"
+s'incremente/decremente SANS limite haute (plancher a 1, decision
+utilisateur : "compteur infini"). Si le graphique est deja affiche, le
+changement de page pousse immediatement un update_template.
 
-Fonctionnalites envisagees :
+Selection de dossard (bib_on=True) : boite de dialogue avec un champ de
+recherche texte (autofocus fiabilise par .props("autofocus") + un
+ui.timer de secours qui force le focus), qui filtre en direct la liste
+des athletes (data.timing_data, tri par dossard croissant, recherche sur
+"dossard - NOM prenom"). Le premier resultat correspondant est surligne
+en bleu ; Entree ou le bouton "Valider" le confirme. Chaque ligne de la
+liste est aussi cliquable individuellement (selection directe, liste
+scrollable). Si le champ de recherche est vide, RIEN n'est surligne/
+selectionnable par defaut (il faut taper ou cliquer explicitement). Le
+dossard est capture une seule fois au premier play, puis reutilise tel
+quel pour le Take (comme les autres donnees memorisees dans
+CasparCG._preview).
 
-- affichage du nom et du contexte de la course ;
-- affichage de l'etat de la connexion au logiciel de donnees ;
-- affichage de l'etat de CasparCG ;
-- liste ou selection d'athletes ;
-- recherche d'un athlete par nom ou par dossard ;
-- selection d'une page graphique ;
-- envoi d'un template en preview ;
-- bouton Take vers programme ;
-- arret ou effacement d'un graphique ;
-- affichage du template actuellement en preview ;
-- affichage du template actuellement au programme ;
-- affichage des erreurs et des confirmations d'action ;
-- eventuellement des macros ou actions favorites.
+Saisie de target (target_on=True) : apres le PREMIER play reussi
+(preview ou direct-pgm via "IN" ; pas re-demande au moment du Take),
+boite de dialogue avec un champ numerique borne entre 1 et 30. La valeur
+saisie est envoyee via update_template.
 
-Le niveau exact de complexite de la premiere version reste a definir.
+Indicateur de connexion : une icone "warning" rouge apparait a droite du
+bouton (propre a chaque instance de SceneButton, verifiee chaque seconde
+via son propre ui.timer) si caspar.connected est False et/ou si
+data.connected est False. Un tooltip rouge (bg-red-600) affiche au
+survol le detail du/des probleme(s) ("CasparCG deconnecte" et/ou
+"WebSocket deconnecte").
 
-7. SYSTEME DE TEMPLATES
-------------------------
+Couleur du corps du bouton selon l'etat : idle = gris (slate-700),
+preview = jaune (yellow-600), programme = rouge (red-600).
 
-L'ajout d'un nouveau template doit etre simple et ne pas necessiter de modifier
-profondement le coeur du logiciel.
+ASSOMPTIONS A CONFIRMER (choix faits faute de precision, a valider a
+l'usage) :
+    - 3e clic sur le corps du bouton une fois au programme : aucun effet.
+    - target_on ne se redeclenche pas lors du Take, seulement au premier
+      play.
+    - bib_on ne se redeclenche pas non plus lors du Take.
 
-Approche recommandee a etudier : un fichier de configuration ou manifeste par
-template. Ce manifeste pourrait decrire :
 
-- identifiant unique ;
-- nom visible dans l'interface ;
-- chemin ou nom du template CasparCG ;
-- page ou type de graphique ;
-- parametres obligatoires ;
-- parametres optionnels ;
-- types de controles a afficher ;
-- valeurs par defaut ;
-- actions disponibles ;
-- channel cible autorise ;
-- regles de validation ;
-- eventuellement une categorie ou un ordre d'affichage.
+8. LECONS / PIEGES NICEGUI DECOUVERTS PENDANT LE DEVELOPPEMENT
+------------------------------------------------------------------
 
-L'objectif est qu'un developpeur puisse ajouter un template en editant un
-fichier de configuration et, seulement si necessaire, un petit module Python
-specifique.
+Ces points ont coute du temps de debogage et doivent etre gardes en tete
+pour la suite du developpement de l'interface :
 
-Ne pas imposer trop tot un systeme complexe de plugins. Commencer par une
-convention claire et testable, puis evoluer vers des plugins si les templates
-ont des comportements vraiment differents.
+8.1 .classes(replace=...) remplace TOUTES les classes, y compris celles
+    posees par defaut par NiceGUI/Quasar (ex: la classe "flex" implicite
+    d'un ui.row()). Oublier de la reinclure casse silencieusement le
+    layout (ex: une icone qui ne reste plus sur la meme ligne qu'un
+    texte). Toujours reinclure explicitement "flex" (et tout autre
+    classe de base necessaire) dans la string de remplacement.
 
-8. SEPARATION DES RESPONSABILITES
-----------------------------------
+8.2 ui.button(..., color=None) est necessaire pour desactiver la couleur
+    "primary" (bleue) que Quasar applique par defaut aux boutons ; sinon
+    les classes Tailwind de couleur (text-*, bg-*, border-*) sont
+    silencieusement ignorees/ecrasees.
 
-Les responsabilites devraient rester separees :
+8.3 ui.image(source) : passer un pathlib.Path (pas une simple string) est
+    necessaire pour que NiceGUI reconnaisse un fichier local et le serve
+    automatiquement via une route interne. Une string est envoyee telle
+    quelle comme attribut src au navigateur (resolue relativement a
+    l'URL de la page, pas au filesystem serveur -> 404 silencieux). Voir
+    aussi : dimensionner avec des tailles fixes (h-10 w-16) plutot que
+    w-auto, qui peut mal se comporter avec le composant Quasar QImg
+    sous-jacent.
 
-main.py
-  Lance l'application et assemble les composants principaux.
+8.4 Pour un focus fiable dans une ui.dialog(), combiner
+    .props("autofocus") ET un ui.timer(0.1, lambda: el.run_method
+    ("focus"), once=True) de secours (l'autofocus HTML seul est parfois
+    rate a cause de l'animation d'ouverture de Quasar).
 
-biath_data.py
-  Gere la connexion au WebSocket du logiciel de donnees, le parsing des
-  messages, l'etat de connexion et la mise a disposition des donnees au reste
-  de l'application.
+8.5 PIEGE MAJEUR - "auto-index page" : si du code NiceGUI est ecrit au
+    niveau module (en dehors d'une fonction decoree @ui.page), NiceGUI le
+    re-execute INTEGRALEMENT (y compris de simples assignations Python
+    comme la creation d'instances CasparCG/BiathDataWebsocket) a CHAQUE
+    nouvelle connexion/reconnexion de client navigateur. Consequence
+    reelle rencontree : des instances caspar/data toutes neuves (jamais
+    connectees) etaient recreees a chaque chargement de page, rendant
+    orphelines celles connectees dans @app.on_startup - l'interface
+    affichait donc "deconnecte" en permanence alors que la connexion
+    reelle fonctionnait tres bien en arriere-plan. SOLUTION APPLIQUEE :
+    creer les instances caspar/data au vrai niveau module (une seule
+    fois, avant tout ui.run()), et envelopper toute la construction de
+    l'UI dans une fonction @ui.page("/") qui, elle, peut etre re-executee
+    par client sans consequence puisqu'elle ne fait que REFERENCER les
+    objets globaux existants. Diagnostic : comparer id(caspar)/id(data)
+    entre le point de connexion et le point d'affichage a permis de
+    confirmer le probleme.
 
-casparcg.py
-  Gere le protocole AMCP, les connexions CasparCG, les commandes preview et
-  programme, les reponses et les erreurs.
+8.6 reload=False dans ui.run() est garde par prudence/bonne pratique pour
+    une appli avec des connexions/taches de fond persistantes (evite les
+    complications potentielles du sous-processus de rechargement de
+    uvicorn/NiceGUI), meme si ce n'etait PAS la cause reelle du bug 8.5.
 
-Interface NiceGUI
-  Affiche l'etat, les donnees et les controles. Elle ne doit pas contenir la
-  logique bas niveau du protocole WebSocket ou AMCP.
+8.7 ui.dialog() utilise en `valeur = await dialog` ouvre automatiquement
+    la boite de dialogue et suspend jusqu'a dialog.submit(valeur) - motif
+    pratique pour des flux de saisie modale (utilise pour bib_on et
+    target_on).
 
-Configuration des templates
-  Decrit les templates et leurs parametres sans dupliquer la logique de
-  communication avec CasparCG.
 
-9. ROBUSTESSE ATTENDUE
-----------------------
+9. CONFIGURATION / VALEURS DE TEST UTILISEES
+-------------------------------------------------
 
-Le logiciel est destine a un contexte de diffusion en direct. Les problemes
-suivants doivent etre pris en compte des le debut :
+Ces valeurs sont des PLACEHOLDERS de developpement local, a remplacer par
+les vraies valeurs de production :
 
-- perte temporaire du WebSocket ;
-- redemarrage du logiciel de donnees ;
-- perte de connexion a CasparCG ;
-- reponse AMCP en erreur ;
-- template inexistant ou mal configure ;
-- parametre manquant ou invalide ;
-- double clic ou action envoyee deux fois ;
-- desynchronisation entre l'etat connu par le controle et l'etat reel de
-  CasparCG ;
-- reconnexion sans bloquer l'interface ;
-- fermeture propre de l'application.
+- CasparCG AMCP : 127.0.0.1:5250 (channel_programm=1, channel_preview=2
+  - DOIT correspondre a un casparcg.config reellement configure avec ces
+  2 channels ; un mismatch a deja produit l'erreur AMCP "Invalid channel
+  specified", corrige cote configuration CasparCG par l'utilisateur).
+- WebSocket donnees biathlon : 127.0.0.1:8765.
+- Serveur NiceGUI : port 8081 (le port 8080 par defaut a produit une
+  erreur Windows [WinError 10013] non totalement expliquee ; changer de
+  port a resolu le probleme).
 
-Les actions envoyees a CasparCG doivent produire un retour visible pour
-l'operateur. Les erreurs ne doivent pas etre silencieuses.
 
-10. TESTABILITE
----------------
+10. DECISIONS ENCORE A PRENDRE
+-------------------------------
 
-Le coeur de l'application doit pouvoir etre teste sans lancer CasparCG ni le
-logiciel de donnees reel.
+Resolues depuis la version precedente de ce fichier :
+    - Format des messages WebSocket : CONNU (voir section 5.4 et
+      biathdata_reference.txt), meme si "d'autres types de messages"
+      restent a documenter/gerer.
+    - Mecanisme du Take preview -> programme : CHOISI (recopie de la
+      commande et des donnees via play_prw_to_pgm, pas de clonage de
+      composition ni de continuite d'animation).
+    - Necessite d'un proxy WebSocket : NON, les templates HTML se
+      connectent directement au serveur de donnees (confirme par le
+      mecanisme send_ip qui transmet l'IP du websocket au template).
+    - Format XML des donnees de template : CONFIRME (templateData/
+      componentData, noms de champs = vrais noms metier du template).
 
-Prevoir a terme :
+Toujours ouvertes :
+    - Adresse/port DEFINITIFS (production) de CasparCG et du serveur de
+      donnees WebSocket.
+    - Version definitive de CasparCG a cibler (2.3.1-lts-stable teste).
+    - Liste des templates de la V1 et leurs parametres exacts (seul un
+      template placeholder "test" existe actuellement).
+    - Organisation des fichiers HTML CasparCG, conventions de nommage.
+    - Execution sur un seul PC ou plusieurs machines du reseau ; nombre
+      d'operateurs simultanes (l'architecture actuelle suppose UNE seule
+      paire caspar/data partagee globalement, pas une instance par
+      operateur).
+    - Authentification et gestion des droits : non implementees.
+    - Journal des actions : non implemente (choix explicite de
+      l'utilisateur : les logs cote CasparCG suffisent pour l'instant).
+    - Persistance de configuration (templates/boutons definis en dur en
+      Python actuellement, pas de fichier de config externe).
+    - Restauration apres redemarrage : self._preview et les taches
+      d'auto-remove sont perdues si le process redemarre (etat en
+      memoire uniquement, juge acceptable pour l'instant).
+    - Signification exacte de C_START (unite probable : millisecondes
+      depuis minuit, non confirmee), VOLADBNUMBER, C_SHOOTING_RACE_NUMBER.
+    - Gestion des "autres types de messages" WebSocket (ignores pour
+      l'instant, cote biathdata_ws.py).
+    - Catalogue reel des templates CasparCG et de leurs champs (le
+      systeme de configuration par template evoque dans les toutes
+      premieres reflexions du projet n'a pas encore ete construit ; pour
+      l'instant chaque graphique est un SceneButton instancie a la main
+      dans build_body).
 
-- tests du parsing des messages WebSocket avec des exemples reels ;
-- tests de validation des parametres de templates ;
-- tests des commandes AMCP generees ;
-- faux serveur WebSocket pour les tests ;
-- faux client ou serveur CasparCG pour les tests ;
-- tests du workflow preview puis Take ;
-- tests des reconnexions et des erreurs.
 
-Les exemples du format WebSocket fournis ulterieurement devront devenir des
-fixtures ou donnees de test.
-
-11. DECISIONS ENCORE A PRENDRE
-------------------------------
-
-Les points suivants ne sont pas encore confirmes et doivent etre demandes avant
-une implementation importante :
-
-- format exact des messages WebSocket ;
-- adresse, port et mode de connexion au logiciel de donnees ;
-- version de Python ;
-- version de CasparCG ;
-- adresse et port AMCP de CasparCG ;
-- mapping exact des deux channels ;
-- mecanisme precis du Take preview vers programme ;
-- liste des templates de la V1 ;
-- liste des parametres de chaque template ;
-- organisation des fichiers HTML CasparCG ;
-- conventions de nommage des templates ;
-- necessite d'un proxy WebSocket ou connexion directe des HTML ;
-- execution sur un seul PC ou sur plusieurs machines du reseau ;
-- nombre d'operateurs simultanes ;
-- authentification et gestion des droits ;
-- besoin d'un journal des actions ;
-- besoin de macros, raccourcis clavier ou boutons favoris ;
-- besoin de persistance de configuration ;
-- besoin de restauration apres redemarrage ;
-- resolution et contraintes d'affichage de la preview ;
-- comportement en cas de perte de donnees pendant la diffusion.
-
-12. REGLES POUR LES FUTURES IA
-------------------------------
+11. REGLES POUR LES FUTURES IA
+-------------------------------
 
 Avant de modifier le code, une IA doit :
 
-- lire ce fichier ;
-- distinguer les exigences confirmees des hypotheses ;
-- demander le format WebSocket avant d'implementer un parser definitif ;
-- conserver la separation entre interface, donnees et CasparCG ;
-- eviter de faire transiter les donnees dans le HTML si le fonctionnement
-  confirme est que le HTML se connecte directement au WebSocket ;
-- ne pas remplacer NiceGUI par une architecture frontend/API complete sans
-  raison technique explicite ;
-- ne pas casser le workflow preview puis Take ;
-- traiter les erreurs de connexion et les reponses CasparCG ;
-- privilegier des changements petits, testables et compatibles avec une
-  utilisation en direct ;
-- ajouter ou mettre a jour les tests lorsque le format ou le comportement est
-  suffisamment confirme.
+- Lire ce fichier en entier.
+- Lire biathdata_reference.txt avant de toucher au parsing des donnees
+  de chronometrage.
+- Distinguer les exigences confirmees (sections 4 a 9) des points encore
+  ouverts (section 10).
+- Conserver la separation des responsabilites : casparcg.py et
+  biathdata_ws.py ne contiennent AUCUNE logique d'affichage ; interface.py
+  et scene_button.py ne contiennent AUCUNE logique bas niveau AMCP/
+  WebSocket (ils appellent uniquement les methodes publiques documentees
+  en sections 4.4 et 5.2).
+- Ne jamais construire de code UI NiceGUI au niveau module en dehors
+  d'une fonction @ui.page(...) - voir le piege 8.5, deja rencontre et
+  corrige une fois, a ne pas reintroduire.
+- Ne pas envoyer BYE dans un contexte qui pourrait etre une connexion
+  locale a la console CasparCG (uniquement sur en connexion reseau
+  distante, ce qui est toujours le cas ici).
+- Ne pas casser le workflow preview -> Take -> programme, ni la logique
+  d'auto-remove differe apres stop() (section 4.3/4.4).
+- Toute nouvelle commande AMCP doit etre verifiee contre la doc du wiki
+  AMCP CasparCG (avec prudence, la doc peut etre datee) plutot que
+  supposee.
+- Privilegier des changements petits, testables, compatibles avec un
+  usage en direct. Confirmer les hypotheses de format de donnees avec
+  l'utilisateur avant de batir dessus (comme cela a ete fait pour le XML
+  des templates et le format WebSocket).
+- Se referer a la section 8 avant de deboguer un probleme d'affichage
+  NiceGUI qui "ne se met pas a jour" ou "n'apparait pas" - plusieurs
+  causes racines non intuitives y sont documentees.
 
-13. PREMIERE ETAPE RECOMMANDEE
-------------------------------
 
-La prochaine etape est de fournir :
+12. PROCHAINES ETAPES ENVISAGEABLES
+--------------------------------------
 
-1. le format exact des messages WebSocket ;
-2. un ou plusieurs exemples complets de messages ;
-3. la liste des premiers templates a piloter ;
-4. les parametres attendus par ces templates ;
-5. la version et la configuration de CasparCG ;
-6. la regle precise de passage preview vers programme.
-
-Une fois ces informations disponibles, implementer d'abord les couches de
-connexion et de modele de donnees, puis un premier template de bout en bout :
-reception des donnees, selection dans NiceGUI, chargement preview, validation
-visuelle et Take vers programme.
+- Definir et implementer le catalogue reel des templates V1 (au dela du
+  placeholder "test"), sous forme de SceneButton configures, ou evoluer
+  vers un systeme de configuration externe (fichier) si le nombre de
+  templates grandit, comme evoque dans les toutes premieres reflexions
+  du projet.
+- Gerer les "autres types de messages" recus sur le WebSocket de donnees.
+- Construire le reste du corps de page (liste/recherche d'athletes,
+  selection de page graphique, affichage de l'etat preview/programme
+  actuel, macros/favoris).
+- Decider et implementer la persistance de configuration si necessaire.
+- Clarifier les valeurs de production (IP/port CasparCG et WebSocket,
+  nombre de machines/operateurs).
