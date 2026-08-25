@@ -284,6 +284,7 @@ class CasparCG:
     #
     #   connect()          - se connecter a CasparCG
     #   disconnect()       - se deconnecter de CasparCG
+    #   change_connection() - changer ip/port/channels et reconnecter aussitot
     #   play_template()    - charger/jouer un graphique (preview ou pgm)
     #   update_template()  - mettre a jour les donnees d'un graphique deja charge
     #   remove_template()  - retirer completement un graphique d'un layer
@@ -352,6 +353,34 @@ class CasparCG:
             self.reader = None
             self.writer = None
             self.connected = False
+
+    #change l'adresse/les channels et reconnecte immediatement avec les
+    #nouvelles valeurs (utilise par la boite de dialogue Parametres, pour
+    #appliquer un changement d'IP/port/channel sans redemarrer le logiciel)
+    async def change_connection(
+        self,
+        ip: str | None = None,
+        port: int | None = None,
+        channel_preview: int | None = None,
+        channel_programm: int | None = None,
+    ) -> str | None:
+        """Update connection settings and reconnect right away.
+
+        Returns None on success, or an error string on failure (from the
+        reconnect attempt) - same contract as connect().
+        """
+        await self.disconnect()
+
+        if ip is not None:
+            self.ip = ip
+        if port is not None:
+            self.port = port
+        if channel_preview is not None:
+            self.channel_preview = channel_preview
+        if channel_programm is not None:
+            self.channel_programm = channel_programm
+
+        return await self.connect()
 
     #play un template sur le channel et layer donné avec les données fournies
     async def play_template(
@@ -473,13 +502,15 @@ class CasparCG:
 
         return prw_response, pgm_response
 
-    #permet d'envoyer le graphique actuellement au prw directement au pgm et de l'arreter sur le prw
+    #permet d'envoyer le graphique actuellement au prw directement au pgm et de le clear sur le prw
     async def play_prw_to_pgm(self, layer: int) -> AMCPResponse:
         """Play the graphic currently in preview to the programme, then
-        stop it on the preview.
+        clear it immediately on the preview.
 
         Replays the same template/data that was last sent to preview via
-        play_template, onto the programme channel/layer given.
+        play_template, onto the programme channel/layer given. Unlike
+        stop(), clear() removes the preview producer right away, with no
+        stop animation and no delayed auto-remove.
         """
         if self._preview is None:
             return AMCPResponse(code=0, message="Nothing in preview to take", data=[])
@@ -494,7 +525,7 @@ class CasparCG:
         )
 
         if response.is_success:
-            await self.stop("prw", cg_layer=self._preview["cg_layer"])
+            await self.clear("prw", layer=1)
             self._preview = None
 
         return response

@@ -1,0 +1,616 @@
+[
+  {
+    "_example": true,
+    "_note": "Entree de documentation, ignoree au chargement (voir _example dans buttons_config.py). JSON n'accepte pas les commentaires, elle sert donc de reference listant tous les champs possibles. Seuls section/label/template/layer sont obligatoires, tout le reste est optionnel et retombe sur les defauts du constructeur SceneButton si omis.",
+    "section": "prerace | race | postrace (obligatoire)",
+    "row": "numero de ligne dans la section, defaut 1",
+    "column": "numero de colonne dans la ligne, defaut 1",
+    "label": "texte affiche sur le bouton (obligatoire)",
+    "template": "nom du template CasparCG a charger (obligatoire)",
+    "layer": "numero de layer video CasparCG (obligatoire, entier)",
+    "cg_layer": "layer d'empilement CG a l'interieur du layer video, defaut 1",
+    "extra_data": {
+      "cle_du_champ_template": "valeur fixe toujours envoyee avec ce bouton, defaut aucune"
+    },
+    "send_ip": "true/false, envoie automatiquement l'ip du serveur de donnees dans field_ip, defaut false",
+    "field_ip": "nom du champ template recevant l'ip, defaut 'ip'",
+    "bib_on": "true/false, active la boite de dialogue de selection de dossard au premier play, defaut false",
+    "field_bib": "nom du champ template recevant le dossard, defaut 'bib'",
+    "multipage_on": "true/false, active les fleches de changement de page, defaut false",
+    "field_page": "nom du champ template recevant le numero de page, defaut 'page'",
+    "reset_page_on_play": "true/false, remet la page a 1 a chaque relance depuis idle, defaut false",
+    "target_on": "true/false, active la boite de dialogue de saisie d'une valeur cible (1-30) au premier play, defaut false",
+    "field_target": "nom du champ template recevant la valeur cible, defaut 'target'",
+    "free_texts": [
+      {
+        "field": "cle_du_champ_template_1",
+        "label": "champ texte libre SANS liste de suggestions (simple ui.input)"
+      },
+      {
+        "field": "cle_du_champ_template_2",
+        "label": "avec options : affiche une combo box + un champ texte libre en dessous, mutuellement exclusifs. Un bouton '+' a cote de la combo box permet a l'operateur d'ajouter une option en direct, utilisable immediatement ET ecrite ici meme dans templates.json (persistee)",
+        "options": [
+          "Valeur A",
+          "Valeur B",
+          "Valeur C"
+        ]
+      }
+    ],
+    "intermediate_on": "true/false, affiche une combo box d'intermediaire sous le bouton, defaut false",
+    "intermediate_type": "'shoot_out' (C_INTERSHOOT*) / 'slope' (C_INTERSLOPE*) / 'relay' (C_RELAY1/2/3 si le format de course en est un) - dans tous les cas, liste filtree depuis data.config.interorder",
+    "field_intermediate": "nom du champ template recevant l'intermediaire choisi, defaut 'timekey'",
+    "_race_formats_note": "optionnel, restreint le bouton a une liste de formats de course (compares a data.event_infos.RACEFORMAT, ex: 'PURSUIT', 'MASSSTART', 'INDIVIDUAL', 'SPRINT') ; si le format actuel n'y figure pas, le bouton est grise et inutilisable, avec une icone d'avertissement a cote ; omis (pas de cle du tout) = actif pour tous les formats",
+    "race_formats": [
+      "PURSUIT"
+    ]
+  },
+  {
+    "_example": true,
+    "_column_title": true,
+    "_note": "Exemple de TITRE DE COLONNE (pas un bouton) - affiche un texte au-dessus de toute une colonne d'une section. Entree ignoree au chargement (deja filtree par _example, comme la doc ci-dessus). Pour un vrai titre, retirer la cle _example (mais garder _column_title: true) : section/column/title sont alors obligatoires.",
+    "section": "prerace | race | postrace (obligatoire)",
+    "column": "numero de colonne a titrer au sein de la section (obligatoire) - un seul titre par (section, column), un second appel remplace le premier",
+    "title": "texte affiche au-dessus de cette colonne (obligatoire)"
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 1,
+    "label": "FP EVENT TITLE",
+    "template": "fp_event_title",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 1,
+    "label": "LT EVENT TITLE",
+    "template": "lt_event_title",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 2,
+    "label": "FP VENUE LOCATION",
+    "template": "fp_venue_loc",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 3,
+    "label": "FP WEATHER",
+    "template": "fp_multiline_infos",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "extra_data": {
+      "mode": "weather"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 3,
+    "label": "HP WEATHER",
+    "template": "hp_multiline_infos",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "extra_data": {
+      "mode": "weather"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 4,
+    "label": "FP SLOPE INFOS",
+    "template": "fp_multiline_infos",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "extra_data": {
+      "mode": "slope"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 4,
+    "label": "HP SLOPE INFOS",
+    "template": "hp_multiline_infos",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "extra_data": {
+      "mode": "slope"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 5,
+    "label": "FP STARTLIST",
+    "template": "fp_list",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "reset_page_on_play": true,
+    "target_on": false,
+    "extra_data": {
+      "timekey": "C_START"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 5,
+    "label": "HP STARTLIST",
+    "template": "hp_startlist",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "reset_page_on_play": true,
+    "target_on": false,
+    "extra_data": {
+      "timekey": "C_START"
+    }
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 6,
+    "label": "COUNTDOWN TO START",
+    "template": "bx_countdown",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 7,
+    "label": "FREE TEXT",
+    "template": "bx_freetext",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "free_texts": [
+      {
+        "field": "freetext",
+        "label": "FREE TEXT",
+        "options": [
+          "Valeur A",
+          "Valeur B",
+          "Valeur C",
+          "TEST"
+        ]
+      }
+    ]
+  },
+  {
+    "section": "postrace",
+    "row": 1,
+    "column": 2,
+    "label": "PODIUM",
+    "template": "fp_podium",
+    "layer": 10,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "postrace",
+    "row": 1,
+    "column": 1,
+    "label": "FP RESULTS",
+    "template": "fp_list",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "reset_page_on_play": true,
+    "target_on": false,
+    "extra_data": {
+      "timekey": "C_TIME"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 1,
+    "label": "ATHLETE BIO",
+    "template": "lt_athlete_bio",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": true,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 1,
+    "label": "ATHLETE PROGRESS",
+    "template": "lt_athlete_progress",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": true,
+    "multipage_on": false,
+    "target_on": false
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 2,
+    "label": "PURSUIT START",
+    "template": "lt_poursuit_start",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "POURSUIT"
+    ]
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 4,
+    "label": "INDIV SLOPE INTER",
+    "template": "lt_indiv_inter",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": true,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "INDIV",
+      "SPRINT"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "slope",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 4,
+    "label": "INDIV SHOOT INTER",
+    "template": "lt_indiv_inter",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": true,
+    "multipage_on": false,
+    "target_on": true,
+    "race_formats": [
+      "INDIV",
+      "SPRINT"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "shoot_out",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 4,
+    "label": "INDIV FINISH INTER",
+    "template": "lt_indiv_inter",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": true,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "INDIV",
+      "SPRINT"
+    ],
+    "extra_data": {
+      "timekey": "C_TIME"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 5,
+    "label": "MASS SLOPE INTER",
+    "template": "lt_inter_mass",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "slope",
+    "field_intermediate": "timekey",
+    "extra_data": {
+      "maxlines": "9"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 5,
+    "label": "MASS SHOOT INTER",
+    "template": "lt_inter_mass",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "shoot_out",
+    "field_intermediate": "timekey",
+    "extra_data": {
+      "maxlines": "6"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 5,
+    "label": "RELAY INTER",
+    "template": "lt_inter_mass",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "relay",
+    "field_intermediate": "timekey",
+    "extra_data": {
+      "maxlines": "9"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 6,
+    "label": "SLOPE RESULTS",
+    "template": "hp_result_list",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "slope",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 3,
+    "label": "RACE PROGRESS",
+    "template": "bx_progress",
+    "layer": 30,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "slope",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 6,
+    "label": "SHOOT RESULTS",
+    "template": "hp_result_list",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "shoot_out",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 6,
+    "label": "RELAY RESULTS",
+    "template": "hp_result_list",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": true,
+    "target_on": false,
+    "race_formats": [
+      "RELAY"
+    ],
+    "intermediate_on": true,
+    "intermediate_type": "relay",
+    "field_intermediate": "timekey"
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 5,
+    "label": "MASS FINISH INTER",
+    "template": "lt_inter_mass",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "MASSSTART",
+      "POURSUIT",
+      "RELAY"
+    ],
+    "extra_data": {
+      "timekey": "C_TIME",
+      "maxlines": "9"
+    }
+  },
+  {
+    "section": "race",
+    "row": 1,
+    "column": 2,
+    "label": "REMAIN AT START",
+    "template": "hp_remain_at_start",
+    "layer": 20,
+    "send_ip": true,
+    "bib_on": false,
+    "multipage_on": false,
+    "target_on": false,
+    "race_formats": [
+      "INDIV",
+      "POURSUIT",
+      "SPRINT"
+    ]
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "1",
+    "title": "EVENT TITLE"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "2",
+    "title": "VENUE LOCATION"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "3",
+    "title": "WEATHER"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "4",
+    "title": "SLOPE INFOS"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "5",
+    "title": "START LISTS"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "6",
+    "title": "COUNTDOWN"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "7",
+    "title": "FREE TEXT"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "1",
+    "title": "ATHLETE"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "2",
+    "title": "START"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "4",
+    "title": "INDIVIDUAL INTERMEDIAITES"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "5",
+    "title": "MASS INTERMEDIAITES"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "6",
+    "title": "INTERMEDIAITES RESULTS"
+  },
+  {
+    "_column_title": true,
+    "section": "race",
+    "column": "3",
+    "title": "RACE PROGRESS"
+  },
+  {
+    "_column_title": true,
+    "section": "postrace",
+    "column": "1",
+    "title": "FINAL RESULTS"
+  },
+  {
+    "_column_title": true,
+    "section": "postrace",
+    "column": "2",
+    "title": "PODIUM"
+  }
+]

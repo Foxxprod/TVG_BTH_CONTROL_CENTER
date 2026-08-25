@@ -28,10 +28,23 @@ logiciel de donnees.
 Fichiers principaux :
 
 - main.py
-    Point d'entree. Cree les instances globales `caspar` (CasparCG) et
-    `data` (BiathDataWebsocket), declare la page NiceGUI ("/"), appelle
-    build_header() et build_body(), connecte caspar/data au demarrage du
-    serveur (@app.on_startup), lance ui.run().
+    Point d'entree. Charge config.json (app_config.load_config), cree les
+    instances globales `caspar` (CasparCG) et `data` (BiathDataWebsocket)
+    a partir de ce config, declare la page NiceGUI ("/"), appelle
+    build_header(caspar, data, config), build_body() et build_footer(),
+    connecte caspar/data au demarrage du serveur (@app.on_startup), lance
+    ui.run().
+
+- app_config.py
+    load_config()/save_config(config) : lit/ecrit config.json (theme
+    clair/sombre, titre du logiciel, ip/port du serveur de donnees,
+    ip/port CasparCG, numeros de channel preview/programme). Fichier
+    absent ou incomplet -> complete avec DEFAULT_CONFIG. config.json N'EST
+    PAS commite (voir .gitignore) : c'est un reglage d'instance/machine,
+    contrairement a templates.json (catalogue de graphiques, commite). Le
+    dict `config` charge dans main.py est passe par reference a
+    build_header, qui le modifie et le sauvegarde depuis la boite de
+    dialogue Parametres (voir 6.1) - source de verite unique partagee.
 
 - casparcg.py
     Couche de communication AMCP avec CasparCG. Implementation maison
@@ -50,13 +63,63 @@ Fichiers principaux :
     (build_header) et corps de page (build_body). Ne contient aucune
     logique bas niveau AMCP/WebSocket, uniquement de l'affichage et des
     appels aux methodes publiques de CasparCG/BiathDataWebsocket.
+    build_body divise le corps en 3 conteneurs empiles verticalement
+    (PRE RACE / RACE / POST RACE, voir SECTIONS), chacun organise en une
+    VRAIE grille CSS (fonction interne add_button(section, row, column,
+    **kwargs_scene_button)) : chaque case est un ui.column positionne
+    explicitement via grid-row/grid-column (style CSS), pas des ui.row
+    flex independantes par ligne - sinon "colonne N" ne s'alignerait pas
+    entre les lignes (bug reel rencontre et corrige : avec des lignes flex
+    independantes, la colonne N d'une ligne n'est que sa N-ieme case a
+    elle, sans lien avec la colonne N d'une autre ligne qui a moins
+    d'entrees). Les 3 conteneurs ne se partagent PAS la hauteur a parts
+    egales : PRE RACE et POST RACE se reduisent a leur hauteur de contenu
+    (comportement flex par defaut, flex-grow 0), RACE absorbe tout le
+    reste de la hauteur disponible (flex-1) - ex: POST RACE avec 2
+    boutons reste compact, RACE s'etend d'autant plus. Choix explicite de
+    l'utilisateur, RACE cible en dur (pas de logique dynamique "la section
+    avec le plus de contenu grandit" - non faisable en CSS pur sans mesurer
+    le contenu en JS). Les boutons a creer sont lus depuis templates.json
+    via buttons_config.load_button_configs().
+
+- buttons_config.py
+    load_raw_configs() : lit templates.json TEL QUEL (liste brute, sans
+    filtrage). load_button_configs(raw=None)/load_column_titles(raw=None) :
+    filtrent+valident (boutons vs titres de colonne "_column_title", en
+    ignorant "_example") ; si `raw` est fourni (voir build_body), evite une
+    relecture independante du fichier - important pour que les dicts
+    obtenus soient les MEMES objets que ceux geres ailleurs (persistance,
+    voir plus bas). save_button_configs(raw) : reecrit integralement le
+    fichier. Renvoie [] avec un message si le fichier est absent. Leve une
+    ValueError si le JSON n'est pas une liste ou si un champ obligatoire
+    manque sur une definition (section/label/template/layer pour un
+    bouton, section/column/title pour un titre de colonne).
+
+- templates.json
+    Catalogue des boutons de l'interface, un objet JSON par SceneButton.
+    C'est le point d'entree normal pour ajouter/modifier/retirer un
+    graphique : plus besoin de toucher au code Python, y compris une fois
+    le logiciel compile/livre. PEUT AUSSI ETRE REECRIT PAR LE LOGICIEL
+    LUI-MEME (pas seulement lu) : ajouter une option a un free_text en
+    direct depuis l'interface (icone "+", voir section 7) persiste ce
+    changement ici via buttons_config.save_button_configs(). Commence par
+    une entree de documentation ("_example": true, ignoree au chargement)
+    listant tous les champs possibles avec leur role/defaut - JSON
+    n'acceptant pas les commentaires, c'est le seul moyen de garder cette
+    reference dans le fichier lui-meme. Une entree peut aussi representer
+    un titre de colonne ("_column_title": true) plutot qu'un bouton.
 
 - scene_button.py
     Classe SceneButton : brique reutilisable representant un graphique
     CasparCG pilotable (play preview/programme, take, stop, pages
     multiples, saisie de dossard, saisie de valeur target, envoi
     automatique de l'ip du websocket). C'est le mecanisme prevu pour
-    ajouter facilement de nouveaux graphiques a l'interface.
+    ajouter facilement de nouveaux graphiques a l'interface (instancie
+    desormais depuis templates.json plutot qu'a la main dans interface.py).
+    Maintient un registre de toutes les instances vivantes
+    (SceneButton._instances) ; SceneButton.reset_all() remet tous les
+    boutons a l'etat idle (utilise apres un emergency all out, qui a deja
+    vide CasparCG cote AMCP).
 
 - biathdata_reference.txt
     Documentation de reference de tous les champs disponibles dans un
@@ -71,6 +134,25 @@ Fichiers principaux :
     Fichier historique vide, non utilise. La logique WebSocket vit en
     realite dans biathdata_ws.py (renomme/reoriente en cours de route).
     A supprimer ou fusionner si confirme inutile.
+
+- paths.py
+    resource_path()/user_data_path()/ensure_user_file() : centralisent la
+    distinction ressources embarquees en lecture seule vs fichiers
+    utilisateur modifiables, compatible mode developpement ET executable
+    compile (voir section 13). Utilise par interface.py (LOGO_PATH),
+    buttons_config.py (BUTTONS_CONFIG_PATH) et app_config.py (CONFIG_PATH)
+    - plus aucun de ces 3 fichiers ne construit son propre chemin via
+    Path(__file__) directement.
+
+- requirements.txt
+    Dependances RUNTIME (nicegui, websockets), epinglees aux versions
+    utilisees en developpement. PyInstaller/auto-py-to-exe ne sont PAS
+    dedans (outils de build, pas des dependances de l'application elle-
+    meme - voir section 13).
+
+- BiathControlCenter.spec
+    Specification PyInstaller pour compiler le logiciel en executable
+    Windows (voir section 13).
 
 Version de Python utilisee en developpement : 3.13 (Python313, observe
 dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
@@ -188,6 +270,14 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     - emergency_all_out() : clear("prw") + clear("pgm"), retourne les deux
       AMCPResponse. Vide integralement les deux channels (tout producer,
       y compris les graphiques).
+    - change_connection(ip=None, port=None, channel_preview=None,
+      channel_programm=None) : disconnect() puis met a jour les attributs
+      fournis (les autres restent inchanges) puis connect(). Retourne None
+      ou un message d'erreur (meme contrat que connect()). Utilise par la
+      boite de dialogue Parametres (voir 6.1) pour appliquer un changement
+      d'IP/port/channel EN DIRECT, sans redemarrer le logiciel. Reconnecte
+      toujours (meme un simple changement de channel, qui ne necessite pas
+      forcement une nouvelle connexion TCP) - choix assume par simplicite.
 
 4.5 Rappels de protocole AMCP (source : wiki AMCP CasparCG, la doc note
     elle-meme qu'elle peut etre datee, a re-verifier avec
@@ -276,7 +366,7 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
 6. INTERFACE.PY - DETAIL DE L'IMPLEMENTATION
 -----------------------------------------------
 
-6.1 build_header(caspar, data)
+6.1 build_header(caspar, data, config)
     Barre d'outils fixe en haut de page (ui.header), style sombre
     (bg-slate-900), avec marge (m-3) et coins arrondis sur les 4 cotes
     (rounded-2xl, overflow-hidden pour que les elements colles respectent
@@ -285,11 +375,14 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     Contenu, de gauche a droite :
     - Logo (assets/foxxprod_logo.png, dimensions fixes h-10 w-16).
     - Panneau blanc "flush" (pleine hauteur du header, sans bordure ni
-      arrondi individuel) avec le titre du logiciel "BIATHLON - CONTROL
-      CENTER".
+      arrondi individuel) avec le titre du logiciel (software_title_label,
+      texte initial config["software_title"], modifiable en direct depuis
+      Parametres - plus jamais "BIATHLON - CONTROL CENTER" fige en dur).
     - Titre de l'epreuve (data.event_infos.TITLE) et nom de la course
       (data.event_infos.EVENT_NAME, en gras), meme taille de police,
       separes par un tiret.
+    - Bouton icone "settings" (rond, contour slate) : ouvre settings_dialog
+      (voir plus bas).
     - Bouton "EMERGENCY ALL OUT" (contour rouge, fond rouge legerement
       transparent bg-red-600/20, icone warning) : appelle
       caspar.emergency_all_out() et notifie le resultat.
@@ -303,19 +396,75 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
       (calcule depuis event_infos.STARTHOUR par format_race_clock).
 
     Tout se rafraichit chaque seconde via ui.timer(1.0, update_header).
-    Le fond de la PAGE (pas du header) est regle via
-    ui.query("body").classes(replace="bg-slate-50") (blanc legerement
-    casse).
+    Le fond de la PAGE (pas du header) est regle par apply_body_background()
+    (bg-slate-50 clair / bg-slate-900 sombre selon config["dark_mode"]).
+    build_header() neutralise aussi le padding HORIZONTAL par defaut de
+    NiceGUI autour du contenu de page (ui.query(".nicegui-content")
+    .style("padding-left: 0; padding-right: 0;"), PAS le padding-top/
+    bottom - voir piege 8.9) pour que build_body/build_footer restent
+    alignes avec le header.
+
+    Boite de dialogue Parametres (settings_dialog, construite UNE FOIS,
+    pas a chaque ouverture - contrairement aux boites ephemeres de
+    scene_button.py, car le header est present en permanence) :
+    - Mode sombre (ui.switch) : pilote ui.dark_mode() (composants Quasar
+      natifs : dialogues, champs...), apply_body_background() (fond de
+      page) ET SceneButton.set_dark_mode() (cartes de section PRE RACE/
+      RACE/POST RACE + chaque SceneButton : box, bouton, labels bib/
+      target - voir 7). Le header/footer restent sombres en permanence
+      dans les deux modes (deja bg-slate-900 fixe), non concernes.
+      SceneButton sert de point de coordination central pour le theme
+      (comme il l'est deja pour _active_preview/_active_pgm) :
+      set_dark_mode() rafraichit direct tous les SceneButton deja
+      construits ET previent les abonnes externes via
+      on_dark_mode_change() (utilise par build_body pour ses cartes de
+      section, qui ne sont pas des SceneButton mais doivent suivre le
+      meme theme - evite de dupliquer un etat sombre/clair separe dans
+      interface.py). Restent NON adaptes au theme (portee volontairement
+      limitee) : icones bib/target/connexion (gris moyen, lisible dans
+      les deux modes en pratique), panneaux blancs internes du header
+      (titre logiciel, HEURE/TMPS COURSE) - accents "papier" volontaires
+      sur le header deja sombre en permanence, pas lies au toggle.
+    - Titre du logiciel (ui.input).
+    - IP/port du serveur de donnees WebSocket, IP/port CasparCG, numero de
+      channel preview et programme (ui.input/ui.number).
+    on_settings_save() : met a jour le dict `config` (valeur vide/nulle
+    d'un champ -> garde l'ancienne valeur plutot que d'ecraser, protection
+    minimale), appelle app_config.save_config(config) pour persister dans
+    config.json, PUIS applique tout immediatement (dark_mode.set_value,
+    apply_body_background, software_title_label.text) et reconnecte en
+    direct data.change_ip(...) et caspar.change_connection(...) - sans
+    redemarrer le logiciel, exactement l'exigence formulee par
+    l'utilisateur pour cette fonctionnalite. Notifie une erreur de
+    connexion si change_ip/change_connection en renvoie une (les
+    parametres restent quand meme enregistres - la reconnexion se fera
+    seule via les boucles de fond _ping_loop/_receive_loop habituelles).
 
 6.2 build_body(caspar, data)
-    Corps de page. Contient actuellement un unique SceneButton de test
-    (template "test", layer=20, send_ip/bib_on/multipage_on/target_on
-    tous actives) - a etoffer avec les vrais boutons/templates de la V1.
+    Corps de page. Voir section 2 (description du fichier interface.py)
+    pour le detail a jour : 3 conteneurs empiles (PRE RACE/RACE/POST
+    RACE), grille CSS ligne/colonne par conteneur, boutons lus depuis
+    templates.json.
 
-6.3 Points d'architecture NiceGUI importants (voir aussi section 8) :
-    - build_header/build_body sont appeles depuis une fonction decoree
-      @ui.page("/") dans main.py, PAS au niveau module. C'est une
-      correction critique (voir section 8.5).
+6.3 build_footer(caspar, data)
+    Pied de page (ui.footer), meme style que le header (bg-slate-900,
+    m-3, rounded-2xl). Actions globales, independantes de quel(s)
+    bouton(s) ont envoye ce qui est actuellement affiche :
+    - "ALL OUT" (contour orange) : SceneButton.stop_all_pgm() - stoppe
+      (CG STOP classique, meme mecanisme que le survol "OUT" de chaque
+      bouton, avec l'auto-remove differe habituel) TOUS les boutons
+      actuellement au programme. Ne touche pas a la preview.
+      DIFFERENT de "EMERGENCY ALL OUT" (header) qui fait un CLEAR
+      immediat des deux channels entiers (tout producer, pas seulement
+      les boutons CG, sans animation de sortie).
+    - "CLEAR PRW" (contour jaune) : caspar.clear("prw", layer=1) puis
+      SceneButton.reset_preview_button() pour resynchroniser l'affichage
+      du bouton qui occupait la preview.
+
+6.4 Points d'architecture NiceGUI importants (voir aussi section 8) :
+    - build_header/build_body/build_footer sont appeles depuis une
+      fonction decoree @ui.page("/") dans main.py, PAS au niveau module.
+      C'est une correction critique (voir section 8.5).
 
 
 7. SCENE_BUTTON.PY - DETAIL DE L'IMPLEMENTATION
@@ -331,7 +480,9 @@ Constructeur :
                 send_ip=False, field_ip="ip",
                 bib_on=False, field_bib="bib",
                 multipage_on=False, field_page="page",
-                target_on=False, field_target="target")
+                reset_page_on_play=False,
+                target_on=False, field_target="target",
+                free_texts=None)
 
     Les noms de champs (field_ip, field_bib, field_page, field_target)
     sont CONFIGURABLES par bouton (chaque template CasparCG peut avoir
@@ -360,23 +511,154 @@ s'incremente/decremente SANS limite haute (plancher a 1, decision
 utilisateur : "compteur infini"). Si le graphique est deja affiche, le
 changement de page pousse immediatement un update_template.
 
-Selection de dossard (bib_on=True) : boite de dialogue avec un champ de
-recherche texte (autofocus fiabilise par .props("autofocus") + un
+Selection de dossard (bib_on=True) : boite de dialogue (_ask_bib) avec un
+champ de recherche texte (autofocus fiabilise par .props("autofocus") + un
 ui.timer de secours qui force le focus), qui filtre en direct la liste
 des athletes (data.timing_data, tri par dossard croissant, recherche sur
-"dossard - NOM prenom"). Le premier resultat correspondant est surligne
-en bleu ; Entree ou le bouton "Valider" le confirme. Chaque ligne de la
-liste est aussi cliquable individuellement (selection directe, liste
-scrollable). Si le champ de recherche est vide, RIEN n'est surligne/
-selectionnable par defaut (il faut taper ou cliquer explicitement). Le
-dossard est capture une seule fois au premier play, puis reutilise tel
+"dossard - NOM prenom") dans une variable locale `filtered` recalculee a
+chaque frappe. Navigation : fleches haut/bas (keydown.up/down.prevent)
+deplacent un index de surlignage `selected_index[0]` dans `filtered`
+(liste circulaire, retour au debut/fin), Entree ou le bouton "Valider"
+confirment l'athlete actuellement surligne (`confirm_selected`). Chaque
+ligne de la liste reste aussi cliquable individuellement (selection
+directe, liste scrollable). Si le champ de recherche est vide,
+`selected_index[0]` demarre a -1 : RIEN n'est surligne par defaut (il
+faut taper, cliquer, ou utiliser les fleches pour commencer a naviguer
+dans la liste complete).
+
+Le dossard est capture une seule fois au premier play, puis reutilise tel
 quel pour le Take (comme les autres donnees memorisees dans
-CasparCG._preview).
+CasparCG._preview). Une fois selectionne, l'athlete choisi est affiche
+SOUS le bouton (dans la meme box bordee que les eventuels free_texts, voir
+SceneButton._build : la box n'apparait que si bib_on ou free_texts est
+actif) avec une icone crayon a cote (_build_bib_display) qui rouvre
+_ask_bib a tout moment, pas seulement au premier play
+(_on_change_bib_click) : si le graphique est deja affiche (preview ou
+programme), le nouveau dossard est pousse immediatement via
+update_template, sinon juste memorise pour le prochain play.
 
 Saisie de target (target_on=True) : apres le PREMIER play reussi
 (preview ou direct-pgm via "IN" ; pas re-demande au moment du Take),
 boite de dialogue avec un champ numerique borne entre 1 et 30. La valeur
 saisie est envoyee via update_template.
+
+Champs de saisie libre (free_texts=[{...}, ...]) : zone(s) de saisie
+affichees SOUS le bouton (pas dans une boite de dialogue, contrairement a
+bib_on/target_on), une par entree de la liste. Chaque entree : "field"
+(cle envoyee au template, obligatoire), "label" (affiche sur le champ,
+defaut = field), "options" (liste de strings, optionnelle).
+    - Sans "options" : une seule ligne, simple ui.input texte libre.
+    - Avec "options" : DEUX lignes - une combo box (ui.select, limite aux
+      options) ET un ui.input texte libre juste en dessous (label "Texte
+      libre"), mutuellement exclusifs : choisir une valeur dans la combo
+      box vide le texte libre (input_widget.set_value(None)) et
+      inversement taper dans le texte libre deselectionne la combo box,
+      via on_value_change() de chaque widget. _build_payload() prend la
+      valeur du select si non vide, sinon celle de l'input. Une icone "+"
+      (add_circle) a cote de la combo box ouvre une petite boite de
+      dialogue (_on_add_free_text_option) pour AJOUTER UNE NOUVELLE
+      OPTION EN DIRECT : ajoutee a select_widget.options (utilisable/
+      selectionnee immediatement, sans redemarrer) ET a free_text
+      ["options"] (le MEME dict que celui charge depuis templates.json,
+      voir interface.build_body - donc persistee dans le fichier via
+      self._on_config_changed(), fourni par add_button). scene_button.py
+      ne sait pas ou/comment ecrire templates.json (separation des
+      responsabilites, section 11) : on_config_changed est une simple
+      callback fournie par interface.py (persist_templates(), qui
+      reecrit raw_configs entier via buttons_config.save_button_configs).
+      IMPORTANT : build_body charge templates.json UNE SEULE FOIS via
+      load_raw_configs() (pas un load_button_configs()/load_column_titles
+      () independants comme avant) precisement pour que les dicts
+      free_text passes aux SceneButton soient les MEMES objets que ceux
+      contenus dans raw_configs - une mutation de l'un mute l'autre,
+      necessaire pour que la persistance reflete bien l'ajout.
+PIEGES DEJA RENCONTRES sur cette fonctionnalite (a ne pas refaire) :
+    - Un ui.select seul en mode combo box Quasar (props use-input +
+      new-value-mode="add-unique") a ete essaye en premier pour a la fois
+      choisir dans une liste ET taper une valeur hors liste dans le meme
+      widget : ne fonctionne pas de facon fiable (le wrapper NiceGUI/
+      QSelect tend a re-contraindre la valeur aux options connues).
+    - Un ui.input + <datalist> HTML natif a ensuite ete essaye (texte
+      libre garanti + suggestions cliquables) : fonctionnellement
+      correct, mais rejete par l'utilisateur au profit du design a deux
+      lignes separees ci-dessus (comportement explicitement demande).
+La valeur courante de chaque champ est incluse dans le payload a chaque
+play/update_data (pas de capture "une seule fois" comme bib_on/target_on).
+Les champs sont desactives (widget.disable()) des que l'etat n'est plus
+idle, et reactives au retour a idle (stop, reset_to_idle) - evite de
+changer une valeur pendant que le graphique est deja affiche.
+
+Bouton "intermediaire" (intermediate_on=True, intermediate_type="shoot_out"
+/ "slope" / "relay", field_intermediate="timekey" par defaut) : combo box
+(ui.select) affichee SOUS le bouton, listant les intermediaires
+ACTUELLEMENT en course pour ce type, calcules par
+_current_intermediate_options() a partir de data.config.interorder (voir
+biathdata_reference.txt section 1 : liste ordonnee des noms de cles
+reellement utilises par CETTE course - contient aussi C_RELAY1/2/3 si et
+seulement si le format de course actuel en est un) filtree par prefixe
+("shoot_out" -> "C_INTERSHOOT", "slope" -> "C_INTERSLOPE", "relay" ->
+"C_RELAY" ; attention "C_INTERSHOOT".startswith exclut bien
+C_INTERINSHOOT*, prefixe different malgre la ressemblance). CORRECTION
+D'UNE ERREUR PRECEDENTE : "relay" a d'abord ete implemente avec une liste
+FIXE C_RELAY1..3 codee en dur (en supposant, a tort, que interorder ne
+contenait jamais de cles C_RELAY) - corrige suite a une remarque directe
+de l'utilisateur : interorder PEUT contenir C_RELAY1/2/3 si le format de
+course en est un, donc "relay" utilise le meme filtrage dynamique que les
+deux autres types, pas de cas particulier dans le code.
+_refresh_intermediate_options(), sur un ui.timer(1.0, ...) propre a chaque
+bouton intermediate_on, resynchronise la liste d'options en direct (utile
+car le websocket se connecte APRES la construction de l'interface -
+data.config peut valoir None au demarrage) et reinitialise la selection
+si elle n'est plus valide. La valeur choisie est poussee immediatement via
+update_template si le graphique est deja affiche (pas de capture "au
+premier play" ici, contrairement a bib_on/target_on - changer
+d'intermediaire en direct est le but recherche). Tant qu'aucun
+intermediaire n'est choisi, _build_payload bloque le play/l'update (renvoie
+None, notifie l'operateur) - verifie EN PREMIER, avant meme de demander le
+dossard (bib_on), pour ne pas faire perdre ce travail a l'operateur si
+l'intermediaire s'avere manquant ensuite.
+
+Restriction par format de course (race_formats=["PURSUIT", ...], optionnel,
+None par defaut) : _is_format_available() compare data.event_infos
+.RACEFORMAT (voir biathdata_reference.txt section 2, ex: "MASSSTART") a
+cette liste. Si le format actuel n'y figure pas, TOUT le bouton devient
+inutilisable - _refresh_appearance() le grise entierement (bg-slate-300,
+cursor-not-allowed, label en slate-500, survol IN/OUT force invisible/
+pointer-events-none) ET _on_main_click/_on_hover_click/_on_next_page/
+_on_prev_page retournent immediatement sans effet (double protection :
+visuelle + logique). Une icone "block" grise apparait a cote du bouton
+(meme emplacement que l'icone de connexion) avec un tooltip expliquant le
+format actuellement detecte. _refresh_format_availability(), sur un
+ui.timer(1.0, ...) propre a chaque bouton race_formats, revalidate chaque
+seconde (le format peut n'etre connu qu'apres coup, meme raison que pour
+intermediate_on). Omettre race_formats (None) = bouton actif pour tous les
+formats, comportement inchange par rapport a avant cette fonctionnalite.
+
+Un seul occupant a la fois par slot CasparCG partage entre boutons :
+    - Preview : un seul layer de preview pour tous les boutons. Mettre un
+      bouton en preview clear() de force la preview (immediat, sans
+      animation) et remet a idle (reset_to_idle()) le bouton qui
+      l'occupait avant (SceneButton._active_preview).
+    - Programme : un (layer, cg_layer) donne ne peut avoir qu'un seul
+      occupant (SceneButton._active_pgm, dict indexe par (layer,
+      cg_layer)). Si un bouton est envoye au programme (play direct ou
+      Take) sur le meme (layer, cg_layer) qu'un bouton deja a l'antenne,
+      ce dernier est stoppe (stop(), meme mecanisme que le bouton "OUT"
+      manuel, avec l'auto-remove differe habituel) avant le chargement du
+      nouveau.
+    - SceneButton.reset_all() (utilise par l'Emergency All Out, voir
+      build_header) remet TOUS les boutons a idle et vide ces deux
+      registres.
+    - SceneButton.stop_all_pgm() (async, utilise par le bouton ALL OUT du
+      footer, voir build_footer) stoppe tous les boutons actuellement au
+      programme (appelle button._stop() sur chacun, meme mecanisme que le
+      survol "OUT"), sans toucher a la preview.
+    - SceneButton.reset_preview_button() (utilise par le bouton CLEAR PRW
+      du footer) remet a idle le bouton qui occupe SceneButton
+      ._active_preview, sans envoyer de commande AMCP - a appeler APRES
+      un clear direct de caspar.clear("prw", ...) fait par l'appelant
+      (meme repartition des roles que caspar.emergency_all_out() +
+      SceneButton.reset_all() dans on_emergency_click).
 
 Indicateur de connexion : une icone "warning" rouge apparait a droite du
 bouton (propre a chaque instance de SceneButton, verifiee chaque seconde
@@ -456,6 +738,68 @@ pour la suite du developpement de l'interface :
     pratique pour des flux de saisie modale (utilise pour bib_on et
     target_on).
 
+8.8 PIEGE - une grille "ligne/colonne" faite de plusieurs ui.row()
+    flex-wrap independantes (une par ligne) NE PRODUIT PAS un alignement
+    de colonnes entre les lignes. Chaque ui.row() flex est son propre
+    contexte : "colonne N" n'y designe que le N-ieme enfant de CETTE ligne
+    precise, base sur son propre contenu, sans lien avec les autres
+    lignes. Consequence reelle rencontree (interface.build_body) : un
+    bouton place en (row=2, column=5) apparaissait juste apres celui en
+    (row=2, column=1) au lieu de s'aligner sous la colonne 5 de la ligne 1,
+    car la ligne 2 n'avait que 2 boutons (donc 2 "cases" flex, pas 5).
+    SOLUTION APPLIQUEE : conteneur de section en display:grid (Tailwind
+    "grid"), chaque case etant un ui.column positionne explicitement via
+    le style CSS `grid-row: N; grid-column: M;`. Une vraie grille CSS
+    partage ses pistes de colonnes entre toutes les lignes, donc la
+    colonne M s'aligne verticalement partout, quel que soit le nombre
+    d'entrees des autres lignes.
+
+8.9 PIEGE - ui.header()/ui.footer() (QHeader/QFooter Quasar) sont
+    positionnes plein-largeur par rapport au VIEWPORT par defaut,
+    independamment du padding applique au conteneur de contenu de page
+    (.nicegui-content, qui a un padding par defaut non nul). Consequence
+    reelle rencontree : le header, indente uniquement via son propre m-3,
+    et le corps de page (build_body), indente via son propre px-3 MAIS
+    A L'INTERIEUR du padding par defaut de .nicegui-content, ne
+    s'alignaient pas horizontalement - le corps apparaissait plus
+    indente que le header.
+    SOLUTION APPLIQUEE (build_header) :
+    ui.query(".nicegui-content").style("padding-left: 0; padding-right: 0;")
+    pour ramener le corps de page au meme repere horizontal (le viewport)
+    que le header/footer, puis chaque conteneur (header m-3, corps px-3,
+    footer m-3) reproduit lui meme le meme inset de 12px pour rester
+    visuellement aligne. Utiliser .style() et non .classes(replace=...)
+    ici, pour ne pas casser d'eventuelles classes flex/gap internes de
+    NiceGUI sur cet element (meme categorie de piege que 8.1).
+    PIEGE DANS LE PIEGE (regression reelle rencontree et corrigee) : la
+    toute premiere version de ce correctif utilisait
+    ui.query(".nicegui-content").style("padding: 0;") (les 4 cotes, pas
+    seulement gauche/droite). Or Quasar calcule DYNAMIQUEMENT un
+    padding-top sur ce meme element .nicegui-content pour pousser le
+    contenu sous le QHeader (positionne en "fixed", donc superpose au
+    contenu par defaut sans ce decalage). Mettre "padding: 0" ecrasait
+    aussi ce padding-top -> le corps de page (build_body) se retrouvait
+    affiche SOUS/DERRIERE le header au lieu d'etre entre le header et le
+    footer. D'ou la version finale ci-dessus, qui ne touche QUE
+    padding-left/padding-right et laisse Quasar gerer padding-top/bottom.
+
+8.10 TECHNIQUE - reduire toute une zone de l'UI (boutons, texte, grilles...)
+    sans retoucher chaque classe Tailwind individuellement : propriete CSS
+    "zoom" (pas transform:scale, qui ne modifie pas la taille de boite
+    dans le flux et provoquerait un chevauchement avec les elements
+    suivants). Utilise dans interface.build_body via BODY_ZOOM (0.8 par
+    defaut, seule valeur a modifier pour retoucher la taille globale) sur
+    le conteneur du corps de page uniquement (header/footer non concernes,
+    en dehors de ce conteneur). PIEGE associe : zoom retrecit aussi la
+    boite de l'element dans le flux normal (contrairement a
+    transform:scale) - une hauteur fixe (ex: h-[calc(100vh-190px)]) doit
+    donc etre compensee (divisee par BODY_ZOOM) AVANT le zoom pour que la
+    hauteur RENDUE, une fois le zoom applique, reste correcte (sinon un
+    vide apparait avant le footer). "zoom" est un standard CSS relativement
+    recent avec un support navigateur bon mais pas universel (Firefox
+    seulement depuis mi-2024) - a garder en tete si l'appli doit un jour
+    tourner sur un navigateur different de Chrome/Edge.
+
 
 9. CONFIGURATION / VALEURS DE TEST UTILISEES
 -------------------------------------------------
@@ -463,7 +807,7 @@ pour la suite du developpement de l'interface :
 Ces valeurs sont des PLACEHOLDERS de developpement local, a remplacer par
 les vraies valeurs de production :
 
-- CasparCG AMCP : 127.0.0.1:5250 (channel_programm=1, channel_preview=2
+- CasparCG AMCP : 127.0.0.1:5250 (channel_preview=1, channel_programm=2
   - DOIT correspondre a un casparcg.config reellement configure avec ces
   2 channels ; un mismatch a deja produit l'erreur AMCP "Invalid channel
   specified", corrige cote configuration CasparCG par l'utilisateur).
@@ -488,6 +832,10 @@ Resolues depuis la version precedente de ce fichier :
       mecanisme send_ip qui transmet l'IP du websocket au template).
     - Format XML des donnees de template : CONFIRME (templateData/
       componentData, noms de champs = vrais noms metier du template).
+    - Persistance de configuration des boutons : CHOISI (fichier
+      templates.json, lu par buttons_config.load_button_configs() et
+      consomme par interface.build_body ; voir section 2). Ajouter un
+      graphique ne necessite plus de modifier le code Python.
 
 Toujours ouvertes :
     - Adresse/port DEFINITIFS (production) de CasparCG et du serveur de
@@ -503,8 +851,6 @@ Toujours ouvertes :
     - Authentification et gestion des droits : non implementees.
     - Journal des actions : non implemente (choix explicite de
       l'utilisateur : les logs cote CasparCG suffisent pour l'instant).
-    - Persistance de configuration (templates/boutons definis en dur en
-      Python actuellement, pas de fichier de config externe).
     - Restauration apres redemarrage : self._preview et les taches
       d'auto-remove sont perdues si le process redemarre (etat en
       memoire uniquement, juge acceptable pour l'instant).
@@ -512,11 +858,15 @@ Toujours ouvertes :
       depuis minuit, non confirmee), VOLADBNUMBER, C_SHOOTING_RACE_NUMBER.
     - Gestion des "autres types de messages" WebSocket (ignores pour
       l'instant, cote biathdata_ws.py).
-    - Catalogue reel des templates CasparCG et de leurs champs (le
-      systeme de configuration par template evoque dans les toutes
-      premieres reflexions du projet n'a pas encore ete construit ; pour
-      l'instant chaque graphique est un SceneButton instancie a la main
-      dans build_body).
+    - Catalogue reel des templates CasparCG et de leurs champs : le
+      mecanisme pour les ajouter existe desormais (templates.json, voir
+      section 2), mais le contenu reste a completer par l'utilisateur
+      au-dela du placeholder STARTLIST.
+    - Adaptation des boutons au format de course (nombre de tours/tirs,
+      variantes d'epreuve) pour ne pas afficher, par exemple, des
+      intermediaires qui n'existent pas sur ce format : evoque par
+      l'utilisateur comme prochaine etape, pas encore implemente (voir
+      section 12).
 
 
 11. REGLES POUR LES FUTURES IA
@@ -557,11 +907,14 @@ Avant de modifier le code, une IA doit :
 12. PROCHAINES ETAPES ENVISAGEABLES
 --------------------------------------
 
-- Definir et implementer le catalogue reel des templates V1 (au dela du
-  placeholder "test"), sous forme de SceneButton configures, ou evoluer
-  vers un systeme de configuration externe (fichier) si le nombre de
-  templates grandit, comme evoque dans les toutes premieres reflexions
-  du projet.
+- Completer le catalogue reel des templates V1 dans templates.json (au dela
+  du placeholder STARTLIST) ; le mecanisme de configuration externe est en
+  place (voir section 2), il reste a le peupler avec les vrais graphiques.
+- Adapter dynamiquement les boutons affiches au format de course (nombre
+  de tours, nombre de tirs, variantes d'epreuve) pour ne pas montrer, par
+  exemple, des intermediaires qui n'existent pas sur ce format - a
+  concevoir (regles de filtrage a definir : sans doute a partir de
+  data.event_infos / data.config, voir biathdata_reference.txt).
 - Gerer les "autres types de messages" recus sur le WebSocket de donnees.
 - Construire le reste du corps de page (liste/recherche d'athletes,
   selection de page graphique, affichage de l'etat preview/programme
@@ -569,3 +922,121 @@ Avant de modifier le code, une IA doit :
 - Decider et implementer la persistance de configuration si necessaire.
 - Clarifier les valeurs de production (IP/port CasparCG et WebSocket,
   nombre de machines/operateurs).
+
+
+13. COMPILATION EN EXECUTABLE (PyInstaller / auto-py-to-exe)
+------------------------------------------------------------------
+
+Objectif : pouvoir installer le logiciel sur un PC (hors environnement de
+developpement Python) tout en continuant a l'utiliser normalement en mode
+developpement (python main.py depuis le repo) - les deux doivent marcher
+sans changement manuel entre les deux.
+
+13.1 paths.py - fondation necessaire a la compilation
+    Deux categories de fichiers, deux fonctions (voir aussi section 2) :
+    - resource_path() : ressources EN LECTURE SEULE embarquees dans
+      l'executable (assets/foxxprod_logo.png, templates.json "de base").
+      En mode installe (FROZEN=True, attribut sys.frozen ajoute par le
+      bootloader PyInstaller), pointe vers sys._MEIPASS - un dossier
+      d'extraction TEMPORAIRE, different a chaque lancement, jamais a
+      utiliser pour un fichier qu'on veut ecrire ou retrouver au
+      prochain demarrage.
+    - user_data_path() : fichiers UTILISATEUR modifiables par le
+      logiciel lui-meme (config.json, templates.json une fois copie). En
+      mode installe, %APPDATA%\BiathControlCenter (zone ecrivable SANS
+      droits administrateur, contrairement au dossier d'installation
+      habituel sous Program Files - point important, CasparCG tourne
+      souvent sur un PC de regie sans compte admin permanent). En
+      developpement, la racine du projet (FROZEN=False -> comportement
+      strictement identique a avant l'introduction de paths.py).
+    - ensure_user_file(filename) : au tout premier lancement en mode
+      installe, si le fichier utilisateur n'existe pas encore, le copie
+      depuis la ressource embarquee du meme nom (templates.json "de
+      base" livre avec le logiciel) - sans jamais ecraser une copie
+      utilisateur deja modifiee. Utilise pour templates.json (contenu
+      significatif a preserver), PAS pour config.json (dont l'absence
+      est deja geree nativement par app_config.load_config() via
+      DEFAULT_CONFIG, pas besoin de "graine").
+
+    interface.py (LOGO_PATH), buttons_config.py (BUTTONS_CONFIG_PATH) et
+    app_config.py (CONFIG_PATH) passent tous les trois par paths.py -
+    aucun ne construit plus son propre chemin via Path(__file__)
+    directement (verifie : seul paths.py y fait encore reference).
+
+13.2 BiathControlCenter.spec - configuration PyInstaller
+    A compiler avec `pyinstaller BiathControlCenter.spec` (plus fiable et
+    reproductible que de reconfigurer manuellement l'interface graphique
+    auto-py-to-exe a chaque fois - auto-py-to-exe N'EST QU'UNE interface
+    graphique par-dessus PyInstaller, elle ne charge pas directement un
+    fichier .spec existant). Points cles :
+    - Mode "onedir" (COLLECT, pas juste EXE onefile) : demarrage plus
+      rapide qu'un onefile qui doit se re-extraire dans un dossier
+      temporaire a CHAQUE lancement - preferable pour un usage en direct
+      pendant une diffusion, ou la reactivite au demarrage compte.
+    - collect_all("nicegui") (PyInstaller.utils.hooks) : NiceGUI embarque
+      ses propres ressources statiques (JS/CSS/polices/favicon) qui
+      doivent etre incluses telles quelles, sinon l'interface ne se
+      charge pas une fois compile - piege documente par NiceGUI elle-meme
+      pour tout packaging PyInstaller/Nuitka, pas verifie en pratique ici
+      (pas d'environnement de build disponible pour tester la compilation
+      elle-meme) mais applique par prudence.
+    - datas inclut assets/ (logo) et templates.json (catalogue "de base",
+      voir 13.1) - PAS config.json (jamais embarque, uniquement cree/lu
+      dans %APPDATA% en mode installe).
+    - console=True (choix delibere, PAS le defaut "propre" console=False
+      d'une appli Windows) : main.py affiche l'etat de connexion CasparCG/
+      WebSocket via print() au demarrage, et des erreurs peuvent remonter
+      sur stdout/stderr en cours d'usage (ex: le ConnectionResetError
+      deja rencontre en developpement, section historique du projet).
+      PIEGE PyInstaller CONNU : en mode "windowed" (console=False),
+      sys.stdout/stderr valent None dans un executable sans console - un
+      print() ou un traceback non catche peut alors LEVER UNE EXCEPTION
+      au lieu de simplement s'afficher, ce qui est pire qu'une fenetre de
+      console en plus. A ne repasser en console=False que si le logiciel
+      est juge stable ET qu'aucun print()/traceback resultant n'est plus
+      possible.
+    - main.py utilise deja reload=False dans ui.run() (piege 8.6,
+      necessaire pour un executable compile - NiceGUI reload=True repose
+      sur un mecanisme de re-spawn de process qui ne marche pas une fois
+      frozen). Deja correct avant ce travail de compilation, rien a
+      changer ici.
+
+13.3 requirements.txt
+    Dependances RUNTIME seulement (nicegui, websockets), epinglees aux
+    versions utilisees en developpement (nicegui 3.16.0, websockets
+    15.0.1 au moment ou ce travail a ete fait). PyInstaller et
+    auto-py-to-exe sont des OUTILS DE BUILD (deja installes separement
+    dans l'environnement de developpement au moment de ce travail :
+    PyInstaller 6.11.1, auto-py-to-exe 2.45.0), pas des dependances de
+    l'application elle-meme - volontairement absents de requirements.txt.
+
+13.4 Non verifie / a tester
+    Aucune compilation reelle n'a ete effectuee pendant ce travail (pas
+    d'environnement de build/execution disponible pour lancer
+    `pyinstaller BiathControlCenter.spec` et verifier l'executable
+    resultant). A tester avant un usage en production :
+    - Que l'executable demarre bien et que l'UI NiceGUI se charge
+      (risque principal : ressources NiceGUI manquantes malgre
+      collect_all, cas documente comme frequent pour ce framework).
+    - Que templates.json est bien copie dans %APPDATA%\BiathControlCenter
+      au premier lancement, et que les ecritures ulterieures (ajout
+      d'option de free_text, futures fonctionnalites) persistent bien
+      la-bas et pas dans le dossier d'installation.
+    - Que config.json se cree correctement au premier lancement dans le
+      meme dossier %APPDATA%.
+    - Icone : icon.ico (racine du projet, PAS encore ajoute au repo au
+      moment ou ceci est ecrit) utilise a DEUX endroits distincts, a ne
+      pas confondre : icon="icon.ico" dans EXE() (icone du fichier .exe,
+      gravee a la compilation) ET dans `datas` + main.py
+      (resource_path("icon.ico"), passe a ui.run(favicon=...) - copie
+      embarquee lue A L'EXECUTION pour l'onglet du navigateur, PyInstaller
+      ne rend pas l'icone .exe elle-meme accessible comme fichier une
+      fois compilee). favicon= est optionnel cote code (retombe sur None
+      si icon.ico est absent, ne bloque pas le demarrage), mais icon.ico
+      DOIT exister pour que la compilation reussisse (les deux endroits
+      y font reference sans verification d'existence a la compilation).
+      PIEGE COURANT (pas un bug de compilation) : l'icone du .exe
+      n'apparaissant pas dans l'Explorateur Windows apres compilation est
+      generalement le CACHE D'ICONES Windows, pas un probleme reel - voir
+      compiler.txt pour les solutions (renommer le fichier, redemarrer
+      l'Explorateur, etc.).

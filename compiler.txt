@@ -1,0 +1,37 @@
+Compilation de Biath Control Center en executable Windows
+============================================================
+
+Prerequis :
+- icon.ico present a la racine du projet (format .ico obligatoire, pas .png)
+- dependances installees : pip install -r requirements.txt
+- PyInstaller installe : pip install pyinstaller
+
+Commande de compilation (depuis la racine du projet) :
+
+    pyinstaller BiathControlCenter.spec
+
+Resultat : dist\BiathControlCenter\BiathControlCenter.exe
+(garder tout le dossier BiathControlCenter\ ensemble pour distribuer/
+installer - l'exe seul ne suffit pas, il depend des fichiers a cote).
+
+Pour recompiler proprement apres une modification du code (supprime les
+anciens artefacts avant de relancer) :
+
+    rmdir /s /q build dist
+    pyinstaller BiathControlCenter.spec
+
+Si l'icone n'apparait pas apres compilation :
+- Sur le fichier .exe dans l'Explorateur Windows : c'est presque toujours
+  le CACHE D'ICONES de Windows, pas un probleme de compilation - Windows
+  ne rafraichit pas toujours l'icone d'un .exe qu'il a deja "vu" une fois
+  sans icone/avec une autre icone. Essayer, dans l'ordre : renommer le
+  .exe (force un rafraichissement), redemarrer l'Explorateur (Gestionnaire
+  des taches > Explorateur Windows > Redemarrer), ou en dernier recours
+  redemarrer le PC. Verifier aussi que icon.ico est un VRAI fichier .ico
+  (pas un .png simplement renomme) - sinon PyInstaller peut l'ignorer
+  silencieusement ou produire une icone corrompue.
+- Dans l'onglet du navigateur (favicon) : NiceGUI doit recevoir icon.ico
+  via ui.run(favicon=...) (deja cable dans main.py) - un rechargement
+  complet de la page (Ctrl+F5, le navigateur cache aussi les favicons de
+  son cote) suffit generalement si le favicon ne se met pas a jour apres
+  une recompilation.

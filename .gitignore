@@ -1,0 +1,7 @@
+/casparcg_server
+/config.json
+
+# Artefacts de compilation PyInstaller/auto-py-to-exe (voir
+# BiathControlCenter.spec) - regeneres a chaque build, jamais a committer
+/build
+/dist

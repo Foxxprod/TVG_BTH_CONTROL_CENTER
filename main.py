@@ -1,18 +1,41 @@
 from nicegui import app, ui
 
+from app_config import load_config
 from biathdata_ws import BiathDataWebsocket
 from casparcg import CasparCG
-from interface import build_body, build_header
+from interface import build_body, build_footer, build_header
+from paths import resource_path
 
-# A adapter avec les vraies valeurs de connexion.
-caspar = CasparCG("127.0.0.1", 5250, channel_programm=1, channel_preview=2)
-data = BiathDataWebsocket("127.0.0.1", 8765)
+#icone de l'onglet navigateur (favicon NiceGUI - PAS la meme chose que
+#l'icone du fichier .exe, definie separement dans BiathControlCenter.spec
+#et gravee dans l'executable au moment de la compilation). Doit etre une
+#ressource embarquee accessible A L'EXECUTION (voir paths.py), d'ou le
+#besoin de l'ajouter aussi aux `datas` du .spec, en plus du parametre
+#icon= de EXE(). Optionnelle : si le fichier n'existe pas (ex: pas encore
+#ajoute au repo), NiceGUI retombe sur son favicon par defaut plutot que
+#de planter au demarrage.
+ICON_PATH = resource_path("icon.ico")
+
+# Valeurs de connexion/reglages chargees depuis config.json (voir
+# app_config.py), avec les defauts de DEFAULT_CONFIG si le fichier est
+# absent ou incomplet. Modifiables en direct depuis la boite de dialogue
+# Parametres du header, sans redemarrer le logiciel.
+config = load_config()
+
+caspar = CasparCG(
+    config["caspar_ip"],
+    config["caspar_port"],
+    channel_programm=config["caspar_channel_programme"],
+    channel_preview=config["caspar_channel_preview"],
+)
+data = BiathDataWebsocket(config["websocket_ip"], config["websocket_port"])
 
 
 @ui.page("/")
 def index() -> None:
-    build_header(caspar, data)
+    build_header(caspar, data, config)
     build_body(caspar, data)
+    build_footer(caspar, data)
 
 
 #connexion a casparcg et au websocket au demarrage du serveur nicegui
@@ -26,4 +49,9 @@ async def startup() -> None:
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(title="Biath Control Center", port=8081, reload=False)
+    ui.run(
+        title="Biath Control Center",
+        port=8081,
+        reload=False,
+        favicon=ICON_PATH if ICON_PATH.exists() else None,
+    )
