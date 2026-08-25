@@ -61,7 +61,7 @@ class CasparCG:
         channel_preview: int,
         timeout: float = 5.0,
         reconnect: bool = True,
-        reconnect_delay: float = 2.0,
+        reconnect_delay: float = 5.0,
     ):
         self.ip = ip
         self.port = port
@@ -79,7 +79,7 @@ class CasparCG:
         self._lock = asyncio.Lock()
         self._preview: dict | None = None
 
-        self._ping_interval = 10.0
+        self._ping_interval = 5.0
         self._ping_task: asyncio.Task | None = None
 
         self._remove_delay = 5.0
@@ -117,10 +117,40 @@ class CasparCG:
             self.connected = response.decode().strip() == "PONG"
             return self.connected
 
+    #boucle unique : ping periodique si connecte, sinon tente une reconnexion
+    #(sequentiel, jamais plusieurs tentatives de reconnexion en parallele)
     async def _ping_loop(self) -> None:
         while True:
-            await asyncio.sleep(self._ping_interval)
-            await self.ping()
+            if self.connected:
+                await asyncio.sleep(self._ping_interval)
+                await self.ping()
+            elif self.reconnect:
+                await asyncio.sleep(self.reconnect_delay)
+                await self._reconnect()
+            else:
+                return
+
+    #ferme une eventuelle connexion existante puis retente une connexion complete
+    async def _reconnect(self) -> None:
+        async with self._lock:
+            if self.writer is not None:
+                try:
+                    self.writer.close()
+                except OSError:
+                    pass
+                self.reader = None
+                self.writer = None
+
+            try:
+                self.reader, self.writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.ip, self.port),
+                    timeout=self.timeout,
+                )
+            except (OSError, asyncio.TimeoutError):
+                self.connected = False
+                return
+
+        await self.ping()
 
     #envoyer une commande amcp a casparcg
     async def send_command(self, command: str) -> AMCPResponse:
@@ -260,15 +290,22 @@ class CasparCG:
     #   stop()             - arreter un graphique (remove automatique 5s apres)
     #   clear()            - forcer le clear d'un layer ou d'un channel entier
     #   play_prw_to_pgm()  - jouer au programme le graphique actuellement en preview
+    #   emergency_all_out() - clear complet des deux channels (preview + programme)
     # =====================================================================
 
     #connexion au serveur casparCG
     async def connect(self) -> str | None:
         """Open the AMCP connection, verify it with a PING, and start the
-        periodic ping loop that keeps self.connected up to date.
+        background ping/reconnect loop.
+
+        The loop is started even if this first attempt fails, so a
+        CasparCG that isn't available yet at startup keeps being retried
+        (every self.reconnect_delay seconds) instead of giving up.
 
         Returns None on success, or an error string on failure.
         """
+        error: str | None = None
+
         async with self._lock:
             try:
                 self.reader, self.writer = await asyncio.wait_for(
@@ -277,15 +314,15 @@ class CasparCG:
                 )
             except (OSError, asyncio.TimeoutError) as exc:
                 self.connected = False
-                return str(exc)
+                error = str(exc)
 
-        if not await self.ping():
-            return "No PONG received from CasparCG"
+        if error is None and not await self.ping():
+            error = "No PONG received from CasparCG"
 
         if self._ping_task is None or self._ping_task.done():
             self._ping_task = asyncio.create_task(self._ping_loop())
 
-        return None
+        return error
 
     #deconnexion de casparCG
     async def disconnect(self) -> None:
@@ -427,6 +464,14 @@ class CasparCG:
             self._preview = None
 
         return response
+
+    #action d'urgence : clear complet des deux channels (preview et programme)
+    async def emergency_all_out(self) -> tuple[AMCPResponse, AMCPResponse]:
+        """Force-clear both the preview and programme channels entirely."""
+        prw_response = await self.clear("prw")
+        pgm_response = await self.clear("pgm")
+
+        return prw_response, pgm_response
 
     #permet d'envoyer le graphique actuellement au prw directement au pgm et de l'arreter sur le prw
     async def play_prw_to_pgm(self, layer: int) -> AMCPResponse:

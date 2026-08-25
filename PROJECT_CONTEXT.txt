@@ -1,0 +1,335 @@
+BIATH CONTROL CENTER - CONTEXTE DU PROJET
+============================================
+
+1. OBJECTIF DU PROJET
+----------------------
+
+Biath Control Center est un logiciel de controle pour piloter les habillages
+televisuels pendant une course de biathlon.
+
+Le logiciel doit permettre a un operateur de suivre les donnees de la course et
+de declencher les habillages graphiques dans CasparCG de maniere rapide,
+fiable et comprehensible pendant une diffusion en direct.
+
+Un logiciel distinct existe deja. Il genere et diffuse les donnees de la course
+de biathlon. Le present projet ne doit pas remplacer ce logiciel de donnees :
+il doit principalement consommer ses donnees et piloter les graphiques.
+
+2. ETAT ACTUEL DU REPO
+----------------------
+
+Le repository contient actuellement les fichiers suivants :
+
+- main.py : point d'entree envisage de l'application, actuellement vide.
+- biath_data.py : module reserve a la reception et a la gestion des donnees
+  du logiciel de course, actuellement vide.
+- casparcg.py : module reserve a la communication avec CasparCG, actuellement
+  vide.
+
+Le projet est au tout debut de sa conception. Ne pas supposer qu'une logique
+existante est deja implementee dans ces fichiers.
+
+3. TECHNOLOGIES ENVISAGEES
+---------------------------
+
+Langage principal : Python.
+
+Interface envisagee : NiceGUI.
+
+NiceGUI est privilegie afin de construire une interface web principalement en
+Python, sans devoir developper manuellement une API REST, du HTML, du CSS et du
+JavaScript pour chaque ecran. NiceGUI utilise des composants web et gere la
+communication necessaire en interne.
+
+La solution doit rester une application de controle locale ou reseau, et non
+un site marketing ou une application publique.
+
+Technologies a etudier et valider :
+
+- NiceGUI pour l'interface operateur.
+- asyncio pour les traitements temps reel et les connexions non bloquantes.
+- Client WebSocket Python pour recevoir les donnees du logiciel de course.
+- Client AMCP Python ou couche AMCP interne pour envoyer les commandes a
+  CasparCG.
+- Un systeme de configuration pour declarer les templates graphiques.
+
+Important : ne pas construire une API web publique uniquement par habitude.
+L'objectif est que NiceGUI masque la plus grande partie de cette complexite.
+Il restera toutefois des communications techniques internes : WebSocket avec
+le logiciel de donnees et AMCP avec CasparCG.
+
+4. FLUX GENERAL DES DONNEES
+---------------------------
+
+Le logiciel de donnees de biathlon diffuse les informations via WebSocket.
+
+Flux prevu :
+
+    Logiciel de donnees biathlon
+              |
+              | WebSocket
+              v
+    Biath Control Center
+       |                 |
+       |                 +--> Affichage des informations dans l'interface
+       |
+       +--> Commandes CasparCG via AMCP
+                         |
+                         +--> Channel preview
+                         +--> Channel programme
+
+Les fichiers HTML des graphiques ne recoivent pas directement les donnees
+injectees par Biath Control Center.
+
+Chaque fichier HTML graphique se connecte lui-meme au serveur WebSocket du
+logiciel de donnees et recupere les donnees dont il a besoin.
+
+En revanche, Biath Control Center doit transmettre de nombreux parametres au
+template CasparCG afin de lui indiquer notamment :
+
+- l'adresse IP du serveur de donnees WebSocket ;
+- le port du serveur WebSocket ;
+- le dossard ou l'identifiant de l'athlete concerne ;
+- la page graphique a afficher ;
+- le contexte de course ;
+- les autres parametres propres au template.
+
+Le format exact des donnees WebSocket sera fourni ulterieurement. Toute
+implementation de parsing doit donc etre concue pour pouvoir etre adaptee
+sans modifier toute l'interface.
+
+5. CASPARCG
+-----------
+
+CasparCG est le moteur graphique utilise par le projet.
+
+Le logiciel doit pouvoir piloter au minimum deux channels CasparCG :
+
+- un channel de preview ;
+- un channel de programme / diffusion.
+
+Workflow attendu pour les actions graphiques :
+
+1. L'operateur choisit une action, une page ou un athlete.
+2. Le template est charge dans le channel de preview.
+3. L'operateur verifie le resultat dans l'interface ou la sortie preview.
+4. L'operateur declenche un Take.
+5. Le template ou l'etat prepare est envoye vers le channel programme.
+
+Le comportement exact du transfert preview vers programme doit etre precise.
+Il faudra notamment decider si le Take doit :
+
+- recopier la commande et ses parametres sur le channel programme ;
+- cloner ou commuter une composition deja preparee ;
+- arreter l'ancien graphique avant d'envoyer le nouveau ;
+- conserver ou non les animations et leur etat temporel.
+
+La couche CasparCG devra gerer au minimum :
+
+- connexion et deconnexion AMCP ;
+- verification de l'etat de la connexion ;
+- chargement d'un template ;
+- envoi des arguments au template ;
+- Play, Stop, Clear et Remove selon les besoins ;
+- mise a jour de proprietes ou de donnees ;
+- preview ;
+- Take vers programme ;
+- remontee des erreurs et des reponses CasparCG ;
+- journalisation des commandes importantes.
+
+La version de CasparCG, les ports AMCP et la configuration exacte des channels
+restent a confirmer.
+
+6. INTERFACE OPERATEUR
+----------------------
+
+L'interface doit etre une interface de regie, concue pour une utilisation
+pendant une course en direct.
+
+Elle doit privilegier :
+
+- la rapidite d'action ;
+- la lisibilite ;
+- la visibilite de l'etat preview et programme ;
+- des boutons clairement associes aux templates et aux actions ;
+- la prevention des erreurs de manipulation ;
+- un retour immediat en cas d'erreur CasparCG ou de perte du WebSocket ;
+- l'affichage des donnees de course recues en temps reel.
+
+Fonctionnalites envisagees :
+
+- affichage du nom et du contexte de la course ;
+- affichage de l'etat de la connexion au logiciel de donnees ;
+- affichage de l'etat de CasparCG ;
+- liste ou selection d'athletes ;
+- recherche d'un athlete par nom ou par dossard ;
+- selection d'une page graphique ;
+- envoi d'un template en preview ;
+- bouton Take vers programme ;
+- arret ou effacement d'un graphique ;
+- affichage du template actuellement en preview ;
+- affichage du template actuellement au programme ;
+- affichage des erreurs et des confirmations d'action ;
+- eventuellement des macros ou actions favorites.
+
+Le niveau exact de complexite de la premiere version reste a definir.
+
+7. SYSTEME DE TEMPLATES
+------------------------
+
+L'ajout d'un nouveau template doit etre simple et ne pas necessiter de modifier
+profondement le coeur du logiciel.
+
+Approche recommandee a etudier : un fichier de configuration ou manifeste par
+template. Ce manifeste pourrait decrire :
+
+- identifiant unique ;
+- nom visible dans l'interface ;
+- chemin ou nom du template CasparCG ;
+- page ou type de graphique ;
+- parametres obligatoires ;
+- parametres optionnels ;
+- types de controles a afficher ;
+- valeurs par defaut ;
+- actions disponibles ;
+- channel cible autorise ;
+- regles de validation ;
+- eventuellement une categorie ou un ordre d'affichage.
+
+L'objectif est qu'un developpeur puisse ajouter un template en editant un
+fichier de configuration et, seulement si necessaire, un petit module Python
+specifique.
+
+Ne pas imposer trop tot un systeme complexe de plugins. Commencer par une
+convention claire et testable, puis evoluer vers des plugins si les templates
+ont des comportements vraiment differents.
+
+8. SEPARATION DES RESPONSABILITES
+----------------------------------
+
+Les responsabilites devraient rester separees :
+
+main.py
+  Lance l'application et assemble les composants principaux.
+
+biath_data.py
+  Gere la connexion au WebSocket du logiciel de donnees, le parsing des
+  messages, l'etat de connexion et la mise a disposition des donnees au reste
+  de l'application.
+
+casparcg.py
+  Gere le protocole AMCP, les connexions CasparCG, les commandes preview et
+  programme, les reponses et les erreurs.
+
+Interface NiceGUI
+  Affiche l'etat, les donnees et les controles. Elle ne doit pas contenir la
+  logique bas niveau du protocole WebSocket ou AMCP.
+
+Configuration des templates
+  Decrit les templates et leurs parametres sans dupliquer la logique de
+  communication avec CasparCG.
+
+9. ROBUSTESSE ATTENDUE
+----------------------
+
+Le logiciel est destine a un contexte de diffusion en direct. Les problemes
+suivants doivent etre pris en compte des le debut :
+
+- perte temporaire du WebSocket ;
+- redemarrage du logiciel de donnees ;
+- perte de connexion a CasparCG ;
+- reponse AMCP en erreur ;
+- template inexistant ou mal configure ;
+- parametre manquant ou invalide ;
+- double clic ou action envoyee deux fois ;
+- desynchronisation entre l'etat connu par le controle et l'etat reel de
+  CasparCG ;
+- reconnexion sans bloquer l'interface ;
+- fermeture propre de l'application.
+
+Les actions envoyees a CasparCG doivent produire un retour visible pour
+l'operateur. Les erreurs ne doivent pas etre silencieuses.
+
+10. TESTABILITE
+---------------
+
+Le coeur de l'application doit pouvoir etre teste sans lancer CasparCG ni le
+logiciel de donnees reel.
+
+Prevoir a terme :
+
+- tests du parsing des messages WebSocket avec des exemples reels ;
+- tests de validation des parametres de templates ;
+- tests des commandes AMCP generees ;
+- faux serveur WebSocket pour les tests ;
+- faux client ou serveur CasparCG pour les tests ;
+- tests du workflow preview puis Take ;
+- tests des reconnexions et des erreurs.
+
+Les exemples du format WebSocket fournis ulterieurement devront devenir des
+fixtures ou donnees de test.
+
+11. DECISIONS ENCORE A PRENDRE
+------------------------------
+
+Les points suivants ne sont pas encore confirmes et doivent etre demandes avant
+une implementation importante :
+
+- format exact des messages WebSocket ;
+- adresse, port et mode de connexion au logiciel de donnees ;
+- version de Python ;
+- version de CasparCG ;
+- adresse et port AMCP de CasparCG ;
+- mapping exact des deux channels ;
+- mecanisme precis du Take preview vers programme ;
+- liste des templates de la V1 ;
+- liste des parametres de chaque template ;
+- organisation des fichiers HTML CasparCG ;
+- conventions de nommage des templates ;
+- necessite d'un proxy WebSocket ou connexion directe des HTML ;
+- execution sur un seul PC ou sur plusieurs machines du reseau ;
+- nombre d'operateurs simultanes ;
+- authentification et gestion des droits ;
+- besoin d'un journal des actions ;
+- besoin de macros, raccourcis clavier ou boutons favoris ;
+- besoin de persistance de configuration ;
+- besoin de restauration apres redemarrage ;
+- resolution et contraintes d'affichage de la preview ;
+- comportement en cas de perte de donnees pendant la diffusion.
+
+12. REGLES POUR LES FUTURES IA
+------------------------------
+
+Avant de modifier le code, une IA doit :
+
+- lire ce fichier ;
+- distinguer les exigences confirmees des hypotheses ;
+- demander le format WebSocket avant d'implementer un parser definitif ;
+- conserver la separation entre interface, donnees et CasparCG ;
+- eviter de faire transiter les donnees dans le HTML si le fonctionnement
+  confirme est que le HTML se connecte directement au WebSocket ;
+- ne pas remplacer NiceGUI par une architecture frontend/API complete sans
+  raison technique explicite ;
+- ne pas casser le workflow preview puis Take ;
+- traiter les erreurs de connexion et les reponses CasparCG ;
+- privilegier des changements petits, testables et compatibles avec une
+  utilisation en direct ;
+- ajouter ou mettre a jour les tests lorsque le format ou le comportement est
+  suffisamment confirme.
+
+13. PREMIERE ETAPE RECOMMANDEE
+------------------------------
+
+La prochaine etape est de fournir :
+
+1. le format exact des messages WebSocket ;
+2. un ou plusieurs exemples complets de messages ;
+3. la liste des premiers templates a piloter ;
+4. les parametres attendus par ces templates ;
+5. la version et la configuration de CasparCG ;
+6. la regle precise de passage preview vers programme.
+
+Une fois ces informations disponibles, implementer d'abord les couches de
+connexion et de modele de donnees, puis un premier template de bout en bout :
+reception des donnees, selection dans NiceGUI, chargement preview, validation
+visuelle et Take vers programme.

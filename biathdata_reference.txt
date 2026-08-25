@@ -1,0 +1,145 @@
+REFERENCE DES DONNEES DISPONIBLES VIA BiathDataWebsocket
+==========================================================
+
+Ce fichier documente les champs disponibles dans un message de chronometrage
+recu via le WebSocket (message qui contient "config", "event_infos" et
+"timing_data"), tels qu'observes dans l'exemple fourni le 24/08/2026.
+
+D'apres cet exemple, chaque message de ce type contient un snapshot COMPLET
+de l'etat de course (pas un delta). D'autres types de messages passent aussi
+sur le meme WebSocket mais ne sont pas encore geres/documentes (ignores pour
+l'instant par _handle_message).
+
+Une instance de BiathDataWebsocket expose 3 attributs mis a jour a chaque
+message recu :
+
+    data.config        -> SimpleNamespace (voir section 1)
+    data.event_infos   -> SimpleNamespace (voir section 2)
+    data.timing_data   -> dict[str, SimpleNamespace], cle = dossard (voir section 3)
+    data.latest_data    -> dict brut (JSON complet du dernier message), toujours
+                            disponible en secours (cles originales, non assainies)
+
+Les cles qui ne sont pas des identifiants Python valides (ex: espace) sont
+automatiquement assainies (caracteres non alphanumeriques remplaces par "_")
+pour permettre l'acces par attribut. Ex: "EVENT NAME" -> EVENT_NAME.
+
+
+1. data.config
+---------------
+
+Variable                     | Format observe          | Description
+------------------------------------------------------------------------------
+data.config.interorder       | list[str]                | Ordre des intermediaires
+                              |                           | (noms de cles C_INTER...)
+data.config.WEATHER_TV_WIND_SPEED     | str (numerique)  | Vitesse du vent
+data.config.WEATHER_TV_WIND_DIRECTION | str              | Direction du vent (ex: "NORD")
+data.config.WEATHER                   | str              | Meteo textuelle (ex: "Ensoleille")
+data.config.WEATHER_HUMIDITY          | str (numerique)  | Humidite (%)
+data.config.WEATHER_AIR_TEMP          | str (numerique)  | Temperature air (°C)
+data.config.WEATHER_SNOW_TEMP         | str              | Temperature neige (ou "-" si absent)
+data.config.VENUE_NAME                | str              | Nom du stade
+data.config.PLACE_NAME                | str              | Nom du lieu
+data.config.VENUE_LOGO                | str              | Chemin relatif vers le logo
+
+
+2. data.event_infos
+---------------------
+
+Variable                              | Format observe   | Description
+------------------------------------------------------------------------------
+data.event_infos.ID                   | int              | Identifiant de l'epreuve
+data.event_infos.CODEX                | str              | Code course (ex: "BNAM0113")
+data.event_infos.SPORT                | str              | Discipline (ex: "biath")
+data.event_infos.TITLE                | str              | Titre de la course
+data.event_infos.EVENT_NAME           | str              | Nom de l'epreuve (cle brute:
+                                       |                  | "EVENT NAME", assainie)
+data.event_infos.PLACE                | str              | Lieu de la course
+data.event_infos.CLUB                 | str              | Club organisateur
+data.event_infos.DATE                 | str              | Date, format "JJ-MM-AAAA"
+data.event_infos.STARTHOUR            | str              | Heure de depart, format "HH:MM"
+data.event_infos.RACEFORMAT           | str              | Format (ex: "MASSSTART")
+data.event_infos.DISTANCE             | str (numerique)  | Distance en km
+data.event_infos.DENIV                | str (numerique)  | Denivele
+data.event_infos.LAPTOTAL             | int              | Nombre de tours
+data.event_infos.SHOOTTOTAL           | int              | Nombre de tirs
+data.event_infos.SHOOTNAME            | str              | Sequence des tirs
+                                       |                  | (C=couche, D=debout,
+                                       |                  | ex: "C-C-D-D")
+data.event_infos.TEAMSIZE             | int              | Taille d'equipe (1 = individuel)
+data.event_infos.PENALTYLAPON         | int (0/1)        | Tour de penalite active
+data.event_infos.PENALTYINFO          | str              | Libelle penalite
+data.event_infos.VOLADBNUMBER         | int              | (non identifie precisement)
+data.event_infos.INTERCONFIG          | str              | (vide dans l'exemple)
+data.event_infos.DATACONNECTORACTIVE  | str              | (vide dans l'exemple)
+
+
+3. data.timing_data["<dossard>"]
+-----------------------------------
+
+Cle du dict = numero de dossard sous forme de string (ex: "1", "2"...).
+Acces : data.timing_data["1"].C_LAST_NAME
+
+Variable (suffixe .C_...)     | Format observe        | Description
+------------------------------------------------------------------------------
+C_NUM                         | int                   | Numero de dossard
+C_TRANSPONDER1..4             | str                   | Identifiants transpondeur
+                               |                       | (souvent seul le 1 est rempli)
+C_LAST_NAME                   | str                   | Nom de famille
+C_FIRST_NAME                  | str                   | Prenom
+C_NAME                        | str                   | (vide dans l'exemple, nom
+                               |                       | d'affichage alternatif ?)
+C_SEX                         | int                   | Sexe (1 observe = homme,
+                               |                       | valeur pour femme non
+                               |                       | confirmee dans l'exemple)
+C_CODE                        | str                   | Code licence/federation
+C_PICTURE                     | str                   | Chemin ou URL vers la photo
+                               |                       | ("none" si absente)
+C_NATION                      | str                   | Code nation (ex: "FRA")
+C_FLAG                        | str                   | Chemin vers le drapeau
+C_CATEGORY                    | str                   | Categorie (ex: "SEN", "U21")
+C_COMMITTEE                   | str                   | Code comite regional
+C_START                       | int                   | Heure de depart. TRES
+                               |                       | PROBABLEMENT en millisecondes
+                               |                       | depuis minuit (55800000 ms
+                               |                       | = 15:30:00, coherent avec
+                               |                       | STARTHOUR) - A CONFIRMER
+C_START_POURSUIT               | int                   | Depart poursuite (0 si non
+                               |                       | applicable)
+C_INTERINSHOOT1..8             | int                   | Temps d'entree au pas de tir
+                               |                       | n (meme unite que C_START,
+                               |                       | 0 si non atteint)
+C_INTERSHOOT1..8               | int                   | Temps de sortie du pas de
+                               |                       | tir n
+C_INTERSLOPE1..12              | int                   | Temps aux intermediaires
+                               |                       | de boucle/piste
+C_RELAY1..3                    | int                   | Temps de relais (0 en
+                               |                       | epreuve individuelle)
+C_TIME                         | int                   | Temps total de course
+                               |                       | (0 si pas encore termine)
+C_STATUS                       | str | null            | "" = en course/normal,
+                               |                       | "DNS" = non partant,
+                               |                       | "DNF" = abandon,
+                               |                       | null = termine sans statut
+                               |                       | particulier
+C_SHOOTING_TOTAL_PERCENT       | float                 | % de reussite au tir global
+C_SHOOTING_PRONE_PERCENT       | float                 | % de reussite couche
+C_SHOOTING_STANDING_PERCENT    | float                 | % de reussite debout
+C_SHOOTING_RACE_NUMBER         | int                   | (non identifie precisement:
+                               |                       | possiblement nb de tirs
+                               |                       | pris en compte ou classement
+                               |                       | tir de la course)
+C_BIO1                         | str                   | Ligne de biographie/note 1
+C_BIO2                         | str                   | Ligne de biographie/note 2
+
+
+NOTES IMPORTANTES
+-------------------
+
+- Les unites/significations marquees "A CONFIRMER" ou "non identifie
+  precisement" sont des DEDUCTIONS a partir d'un seul exemple, pas des
+  informations confirmees par le fournisseur du logiciel de donnees.
+  A valider avant de s'appuyer dessus pour un affichage en direct.
+- Cette liste ne couvre que les messages "chronometrage complet". Les autres
+  types de messages vus sur le meme WebSocket restent a documenter plus tard.
+- Si le format des messages evolue, ce fichier devra etre mis a jour en
+  parallele du code de _handle_message dans biathdata_ws.py.
