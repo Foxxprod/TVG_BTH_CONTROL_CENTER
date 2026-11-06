@@ -1,2 +1,5 @@
 nicegui==3.16.0
 websockets==15.0.1
+streamdeck==0.9.8
+hidapi==0.14.0.post4
+Pillow==11.2.1

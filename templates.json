@@ -3,8 +3,8 @@
     "_example": true,
     "_note": "Entree de documentation, ignoree au chargement (voir _example dans buttons_config.py). JSON n'accepte pas les commentaires, elle sert donc de reference listant tous les champs possibles. Seuls section/label/template/layer sont obligatoires, tout le reste est optionnel et retombe sur les defauts du constructeur SceneButton si omis.",
     "section": "prerace | race | postrace (obligatoire)",
-    "row": "numero de ligne dans la section, defaut 1",
-    "column": "numero de colonne dans la ligne, defaut 1",
+    "row": "numero de ligne dans la section (ENTIER, ex: 1 - PAS \"1\" entre guillemets), defaut 1",
+    "column": "numero de colonne dans la ligne (ENTIER, ex: 1 - PAS \"1\" entre guillemets), defaut 1",
     "label": "texte affiche sur le bouton (obligatoire)",
     "template": "nom du template CasparCG a charger (obligatoire)",
     "layer": "numero de layer video CasparCG (obligatoire, entier)",
@@ -42,7 +42,14 @@
     "_race_formats_note": "optionnel, restreint le bouton a une liste de formats de course (compares a data.event_infos.RACEFORMAT, ex: 'PURSUIT', 'MASSSTART', 'INDIVIDUAL', 'SPRINT') ; si le format actuel n'y figure pas, le bouton est grise et inutilisable, avec une icone d'avertissement a cote ; omis (pas de cle du tout) = actif pour tous les formats",
     "race_formats": [
       "PURSUIT"
-    ]
+    ],
+    "second_cg": "nom d'un DEUXIEME template a jouer/stopper/mettre a jour EN MEME TEMPS que 'template' - recoit exactement le meme payload (bib/target/intermediaire/page/free_texts/ip), pas de configuration separee. Optionnel, omis = pas de second CG",
+    "second_cg_layer": "LAYER VIDEO du second CG (comme 'layer' pour le principal, PAS un cg_layer d'empilement) - optionnel, omis = meme layer video que le principal ('layer'). Precise, le second CG joue sur ce layer video independant du principal (2 producers CasparCG separes)",
+    "_restrict_note": "restriction par sexe/categorie - necessite les 2 conditions a la fois : ce reglage ICI (par bouton) ET la case a cocher GLOBALE correspondante 'restreindre par sexe'/'par categorie' (voir entree _restrict_controls plus bas). Aucune restriction automatique sur un bib_on juste parce que la case globale est cochee : il faut aussi activer restrict_to_sex/restrict_to_cat ici. Avec bib_on=true, PAS de combo box (ce bouton connait deja l'athlete selectionne) - son sexe/sa categorie reels sont ajoutes AUTOMATIQUEMENT au payload des que les 2 conditions sont reunies. Avec bib_on=false, une combo box s'affiche sous le bouton (masquee tant que la case globale n'est pas cochee)",
+    "restrict_to_sex": "true/false, active la restriction par sexe pour ce bouton (bib_on=true : calcule depuis l'athlete, pas de combo box / bib_on=false : combo box Hommes/Dames/Hommes et Dames) - defaut false, sans effet tant que la case globale correspondante n'est pas cochee",
+    "field_sex": "nom du champ template recevant 'H'/'D'/'HD', defaut 'sexe'",
+    "restrict_to_cat": "true/false, active la restriction par categorie pour ce bouton (bib_on=true : calcule depuis l'athlete / bib_on=false : combo box de categories/groupes, voir _restrict_controls) - defaut false, sans effet tant que la case globale correspondante n'est pas cochee",
+    "field_cat": "nom du champ template recevant 'ALL' ou un groupe de categories joint par ';' (ex: 'U21;SEN'), defaut 'cat'"
   },
   {
     "_example": true,
@@ -51,6 +58,18 @@
     "section": "prerace | race | postrace (obligatoire)",
     "column": "numero de colonne a titrer au sein de la section (obligatoire) - un seul titre par (section, column), un second appel remplace le premier",
     "title": "texte affiche au-dessus de cette colonne (obligatoire)"
+  },
+  {
+    "_example": true,
+    "_restrict_controls": true,
+    "_note": "Exemple de CONTENEUR DES CASES A COCHER GLOBALES 'restreindre par sexe'/'par categorie' (pas un bouton) - place ces 2 cases TOUJOURS TOUT EN HAUT de la colonne choisie, juste sous le titre (pas de champ 'row', ignore silencieusement s'il est quand meme present : ce conteneur ne peut pas etre place ailleurs qu'en haut de sa colonne). Entree ignoree au chargement (deja filtree par _example). Pour un vrai conteneur, retirer la cle _example (mais garder _restrict_controls: true) : section/column sont alors obligatoires. Une seule instance suffit generalement (etat GLOBAL, partage par toute l'interface) mais rien n'empeche d'en placer plusieurs, tous refletent le meme etat.",
+    "section": "prerace | race | postrace (obligatoire)",
+    "column": "numero de colonne dans la ligne (obligatoire)"
+  },
+  {
+    "_restrict_controls": true,
+    "section": "race",
+    "column": 4
   },
   {
     "section": "prerace",
@@ -186,7 +205,7 @@
     "column": 6,
     "label": "COUNTDOWN TO START",
     "template": "bx_countdown",
-    "layer": 10,
+    "layer": 11,
     "send_ip": true,
     "bib_on": false,
     "multipage_on": false,
@@ -198,7 +217,7 @@
     "column": 7,
     "label": "FREE TEXT",
     "template": "bx_freetext",
-    "layer": 20,
+    "layer": 21,
     "send_ip": true,
     "bib_on": false,
     "multipage_on": false,
@@ -208,13 +227,23 @@
         "field": "freetext",
         "label": "FREE TEXT",
         "options": [
-          "Valeur A",
-          "Valeur B",
-          "Valeur C",
-          "TEST"
+          " TEST"
         ]
       }
     ]
+  },
+  {
+    "section": "prerace",
+    "row": 1,
+    "column": 8,
+    "label": "SPONSORS LIST",
+    "template": "hp_sponsor",
+    "layer": 40,
+    "send_ip": false,
+    "bib_on": false,
+    "multipage_on": true,
+    "reset_page_on_play": true,
+    "target_on": false
   },
   {
     "section": "postrace",
@@ -242,7 +271,11 @@
     "target_on": false,
     "extra_data": {
       "timekey": "C_TIME"
-    }
+    },
+    "restrict_to_cat": true,
+    "field_cat": "cat",
+    "restrict_to_sex": true,
+    "field_sex": "sexe"
   },
   {
     "section": "race",
@@ -300,7 +333,11 @@
     ],
     "intermediate_on": true,
     "intermediate_type": "slope",
-    "field_intermediate": "timekey"
+    "field_intermediate": "timekey",
+    "restrict_to_cat": true,
+    "field_cat": "cat",
+    "restrict_to_sex": true,
+    "field_sex": "sexe"
   },
   {
     "section": "race",
@@ -319,7 +356,11 @@
     ],
     "intermediate_on": true,
     "intermediate_type": "shoot_out",
-    "field_intermediate": "timekey"
+    "field_intermediate": "timekey",
+    "restrict_to_cat": true,
+    "field_cat": "cat",
+    "restrict_to_sex": true,
+    "field_sex": "sexe"
   },
   {
     "section": "race",
@@ -338,7 +379,11 @@
     ],
     "extra_data": {
       "timekey": "C_TIME"
-    }
+    },
+    "restrict_to_cat": true,
+    "field_cat": "cat",
+    "restrict_to_sex": true,
+    "field_sex": "sexe"
   },
   {
     "section": "race",
@@ -384,7 +429,9 @@
     "field_intermediate": "timekey",
     "extra_data": {
       "maxlines": "6"
-    }
+    },
+    "second_cg": "shootingrange",
+    "second_cg_layer": 19
   },
   {
     "section": "race",
@@ -418,6 +465,7 @@
     "bib_on": false,
     "multipage_on": true,
     "target_on": false,
+    "reset_page_on_play": true,
     "race_formats": [
       "MASSSTART",
       "POURSUIT",
@@ -458,6 +506,7 @@
     "bib_on": false,
     "multipage_on": true,
     "target_on": false,
+    "reset_page_on_play": true,
     "race_formats": [
       "MASSSTART",
       "POURSUIT",
@@ -478,6 +527,7 @@
     "bib_on": false,
     "multipage_on": true,
     "target_on": false,
+    "reset_page_on_play": true,
     "race_formats": [
       "RELAY"
     ],
@@ -512,7 +562,7 @@
     "column": 2,
     "label": "REMAIN AT START",
     "template": "hp_remain_at_start",
-    "layer": 20,
+    "layer": 25,
     "send_ip": true,
     "bib_on": false,
     "multipage_on": false,
@@ -612,5 +662,11 @@
     "section": "postrace",
     "column": "2",
     "title": "PODIUM"
+  },
+  {
+    "_column_title": true,
+    "section": "prerace",
+    "column": "8",
+    "title": "SPONSORS"
   }
 ]

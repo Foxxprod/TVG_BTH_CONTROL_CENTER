@@ -77,10 +77,24 @@ class CasparCG:
         self.connected = False
 
         self._lock = asyncio.Lock()
-        self._preview: dict | None = None
+        #un bouton avec second_cg envoie DEUX producers en preview (meme
+        #layer video partage channel_preview-1, cg_layer differents - voir
+        #SceneButton._second_cg_stack_layer). _preview doit donc suivre
+        #plusieurs producers a la fois, indexes par cg_layer, plutot qu'un
+        #seul slot ecrase par le dernier play() - sinon le play du second
+        #CG (juste apres celui du principal) effacait le suivi du
+        #principal, et play_prw_to_pgm() rejouait le SECOND CG au take a
+        #la place du principal (bug reel rencontre : le principal
+        #disparaissait completement au take en passant par la preview).
+        self._preview: dict[int, dict] = {}
 
         self._ping_interval = 5.0
         self._ping_task: asyncio.Task | None = None
+        #dernier temps d'aller-retour PING/PONG mesure (millisecondes),
+        #None tant qu'aucun ping reussi n'a encore eu lieu - affiche au
+        #survol du statut CASPAR CG du header (voir interface.py), demande
+        #explicite de l'utilisateur
+        self.last_ping_ms: float | None = None
 
         self._remove_delay = 5.0
         self._pending_removals: dict[tuple[str, int], asyncio.Task] = {}
@@ -90,7 +104,9 @@ class CasparCG:
     # appelees directement depuis le reste du logiciel)
     # =====================================================================
 
-    #verifie que la connexion amcp est toujours active
+    #verifie que la connexion amcp est toujours active, mesure au passage
+    #le temps d'aller-retour (self.last_ping_ms) - affiche au survol du
+    #statut CASPAR CG du header, voir interface.py
     async def ping(self) -> bool:
         """Send a PING and update self.connected accordingly.
 
@@ -103,6 +119,7 @@ class CasparCG:
             return False
 
         async with self._lock:
+            start = asyncio.get_event_loop().time()
             try:
                 self.writer.write(b"PING\r\n")
                 await asyncio.wait_for(self.writer.drain(), timeout=self.timeout)
@@ -112,9 +129,13 @@ class CasparCG:
                 )
             except (OSError, asyncio.TimeoutError):
                 self.connected = False
+                self.last_ping_ms = None
                 return False
 
             self.connected = response.decode().strip() == "PONG"
+            self.last_ping_ms = (
+                (asyncio.get_event_loop().time() - start) * 1000 if self.connected else None
+            )
             return self.connected
 
     #boucle unique : ping periodique si connecte, sinon tente une reconnexion
@@ -171,8 +192,32 @@ class CasparCG:
     async def _read_response(self) -> AMCPResponse:
         """Read and parse a single AMCP response.
 
-        Handles the multi-line 200 responses, which are terminated by an
-        additional blank line once all data lines have been sent.
+        Response code convention (confirme dans le code source officiel
+        de CasparCG, src/protocol/amcp/AMCPCommandsImpl.cpp, commentaire
+        d'en-tete du fichier) :
+            202 [command] OK  -> execute, AUCUNE ligne supplementaire.
+            201 [command] OK  -> execute, PLUS UNE SEULE ligne de donnee
+                                  (PAS terminee par une ligne vide - une
+                                  seule ligne, point final).
+            200 [command] OK  -> execute, PLUSIEURS lignes de donnees,
+                                  terminees par une ligne vide.
+
+        BUG REEL CORRIGE ICI : cette fonction ne geraiat QUE le cas 200
+        (boucle jusqu'a une ligne vide) - toute commande renvoyant 201
+        (ex: CG INVOKE, voir invoke_template ci-dessous - "201 CG OK\r\n"
+        + le resultat + "\r\n", 2 lignes) laissait sa ligne de donnee NON
+        LUE dans le tampon TCP. La commande AMCP suivante lisait alors
+        cette ligne perimee au lieu de sa propre reponse, desynchronisant
+        TOUT le reste des echanges - jusqu'a ce que le PING periodique de
+        _ping_loop lise cette meme ligne perimee au lieu de "PONG" et
+        declare la connexion perdue (symptome reellement observe par
+        l'utilisateur : deconnexion de CasparCG quelques secondes apres
+        avoir invoque une fonction de template, ex: le bouton SPONSOR IN).
+        Toutes les commandes CG ADD/PLAY/STOP/NEXT/REMOVE/CLEAR/UPDATE
+        deja utilisees ailleurs dans ce fichier renvoient 202 (aucune
+        ligne supplementaire) - ce bug etait donc reste latent jusqu'a
+        l'introduction du tout premier appel a une commande 201
+        (invoke_template).
         """
         line = await asyncio.wait_for(self.reader.readline(), timeout=self.timeout)
         decoded = line.decode("utf-8").strip()
@@ -190,6 +235,9 @@ class CasparCG:
                 if data_line in (b"\r\n", b"\n", b""):
                     break
                 data.append(data_line.decode("utf-8").rstrip("\r\n"))
+        elif code == 201:
+            data_line = await asyncio.wait_for(self.reader.readline(), timeout=self.timeout)
+            data.append(data_line.decode("utf-8").rstrip("\r\n"))
 
         return AMCPResponse(code=code, message=message, data=data)
 
@@ -207,16 +255,16 @@ class CasparCG:
     def format_address(self, channel: str, layer: int | None = None) -> str:
         """Build a "channel-layer" address from a "prw"/"pgm" alias.
 
-        "prw" always targets layer 1 (any layer passed in is ignored).
-        "pgm" requires an explicit layer.
+        Both "prw" and "pgm" require an explicit layer. "prw" no longer
+        forces every button onto a single shared layer 1 - each button
+        previews on its own layer (the same "layer" it uses on "pgm"),
+        so several buttons can be pre-composed in preview at once (see
+        SceneButton._active_preview / _claim_preview).
         """
         channel_number = self._channel_number(channel)
 
-        if channel == "prw":
-            return f"{channel_number}-1"
-
         if layer is None:
-            raise ValueError("layer is required for 'pgm'")
+            raise ValueError(f"layer is required for '{channel}'")
 
         return f"{channel_number}-{layer}"
 
@@ -288,6 +336,7 @@ class CasparCG:
     #   play_template()    - charger/jouer un graphique (preview ou pgm)
     #   update_template()  - mettre a jour les donnees d'un graphique deja charge
     #   remove_template()  - retirer completement un graphique d'un layer
+    #   invoke_template()  - invoquer une fonction exposee par un graphique deja charge
     #   stop()             - arreter un graphique (remove automatique 5s apres)
     #   clear()            - forcer le clear d'un layer ou d'un channel entier
     #   play_prw_to_pgm()  - jouer au programme le graphique actuellement en preview
@@ -394,9 +443,8 @@ class CasparCG:
     ) -> AMCPResponse:
         """Add (and by default play) a graphic template via CG ADD.
 
-        channel/layer are formatted with format_address: "prw" always
-        targets layer 1 (layer is not needed/ignored), "pgm" requires
-        an explicit layer.
+        channel/layer are formatted with format_address: both "prw" and
+        "pgm" require an explicit layer.
         cg_layer is CasparCG's own CG stacking layer within that video
         layer (independent from the video layer itself).
         """
@@ -421,7 +469,11 @@ class CasparCG:
                 pending.cancel()
 
         if channel == "prw" and response.is_success:
-            self._preview = {
+            #indexe par (layer, cg_layer) - un layer video de preview par
+            #bouton (voir format_address), plus le cg_layer pour separer
+            #le producer principal de celui d'un eventuel second_cg quand
+            #les deux partagent le meme layer video (second_cg_layer omis)
+            self._preview[(layer, cg_layer)] = {
                 "template": template,
                 "data": data,
                 "cg_layer": cg_layer,
@@ -445,8 +497,8 @@ class CasparCG:
 
         response = await self.send_command(command)
 
-        if channel == "prw" and response.is_success and self._preview is not None:
-            self._preview["data"] = data
+        if channel == "prw" and response.is_success and (layer, cg_layer) in self._preview:
+            self._preview[(layer, cg_layer)]["data"] = data
 
         return response
 
@@ -457,6 +509,32 @@ class CasparCG:
         """Completely remove the template producer via CG REMOVE."""
         address = self.format_address(channel, layer)
         return await self.send_command(f"CG {address} REMOVE {cg_layer}")
+
+    #invoque une fonction/methode exposee par le template deja charge sur
+    #le channel/layer/cg_layer donne (ex: une fonction JS d'un template
+    #HTML declenchant une animation - "sponsor_in" pour le bouton SPONSOR
+    #IN du footer, voir interface.py/scene_button.py)
+    async def invoke_template(
+        self, channel: str, function: str, layer: int | None = None, cg_layer: int = 1
+    ) -> AMCPResponse:
+        """Invoke a template-exposed method via CG INVOKE.
+
+        Syntax per the official AMCP protocol docs (server/docs/source/
+        amcp/template-graphics-commands.rst) :
+            CG [channel]-[layer] INVOKE [cg_layer] [method]
+        with a documented example of "CG 1-1 INVOKE 1 start_intro" - the
+        method name is a BARE, UNQUOTED token (unlike CG ADD/UPDATE's XML
+        payload), so it must not contain whitespace.
+
+        Does not add/remove/replace the producer - it only calls a
+        function the currently loaded template already exposes (ex: a
+        named animation trigger). Nothing happens (CasparCG itself
+        answers with an error) if no producer is loaded on this
+        channel/layer/cg_layer, or if the template doesn't expose this
+        function.
+        """
+        address = self.format_address(channel, layer)
+        return await self.send_command(f"CG {address} INVOKE {cg_layer} {function}")
 
     #stop un template et programme son remove automatique 5s plus tard
     async def stop(
@@ -490,7 +568,16 @@ class CasparCG:
         response = await self.send_command(f"CLEAR {address}")
 
         if channel == "prw" and response.is_success:
-            self._preview = None
+            if layer is None:
+                #tout le channel preview a ete vide (ex: emergency_all_out)
+                self._preview = {}
+            else:
+                #un seul layer video de preview vide (peut porter plusieurs
+                #cg_layer, ex: template principal + second_cg d'un meme
+                #bouton) - ne pas toucher au suivi des AUTRES layers de
+                #preview, occupes par d'autres boutons
+                for key in [k for k in self._preview if k[0] == layer]:
+                    del self._preview[key]
 
         return response
 
@@ -503,30 +590,34 @@ class CasparCG:
         return prw_response, pgm_response
 
     #permet d'envoyer le graphique actuellement au prw directement au pgm et de le clear sur le prw
-    async def play_prw_to_pgm(self, layer: int) -> AMCPResponse:
+    async def play_prw_to_pgm(self, layer: int, cg_layer: int = 1) -> AMCPResponse:
         """Play the graphic currently in preview to the programme, then
         clear it immediately on the preview.
 
         Replays the same template/data that was last sent to preview via
-        play_template, onto the programme channel/layer given. Unlike
-        stop(), clear() removes the preview producer right away, with no
-        stop animation and no delayed auto-remove.
+        play_template, onto the programme channel/layer given. (layer,
+        cg_layer) together select WHICH preview producer to take - they
+        must match what that producer was originally sent with (see
+        SceneButton._take, which reuses its own layer/cg_layer for both
+        the preview lookup and the programme destination). Unlike stop(),
+        clear() removes the preview producer right away, with no stop
+        animation and no delayed auto-remove.
         """
-        if self._preview is None:
+        preview = self._preview.get((layer, cg_layer))
+        if preview is None:
             return AMCPResponse(code=0, message="Nothing in preview to take", data=[])
 
         response = await self.play_template(
             "pgm",
-            self._preview["template"],
-            data=self._preview["data"],
+            preview["template"],
+            data=preview["data"],
             layer=layer,
-            cg_layer=self._preview["cg_layer"],
-            play_on_load=self._preview["play_on_load"],
+            cg_layer=cg_layer,
+            play_on_load=preview["play_on_load"],
         )
 
         if response.is_success:
-            await self.clear("prw", layer=1)
-            self._preview = None
+            await self.clear("prw", layer=layer)
 
         return response
 

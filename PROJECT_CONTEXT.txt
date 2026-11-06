@@ -121,6 +121,15 @@ Fichiers principaux :
     boutons a l'etat idle (utilise apres un emergency all out, qui a deja
     vide CasparCG cote AMCP).
 
+- race_progress.py
+    Logique PURE (aucun NiceGUI, testee independamment de l'UI) de la
+    ligne de progression de course affichee dans le footer (voir section
+    6.3bis) : calcule la position de chaque athlete le long du parcours a
+    partir de data.config.interorder/data.timing_data, et identifie le
+    leader general, les leaders par categorie/sexe, un "potentiel nouveau
+    leader" et le podium general. Utilise directement par interface.py
+    (build_footer), pas par scene_button.py.
+
 - biathdata_reference.txt
     Documentation de reference de tous les champs disponibles dans un
     message de chronometrage recu via le WebSocket (config, event_infos,
@@ -198,7 +207,12 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     (asyncio.Lock, serialise les commandes), _preview (dict, dernier
     template/data/cg_layer/play_on_load envoye en preview), _ping_interval
     (5.0s), _ping_task, _remove_delay (5.0s), _pending_removals (dict
-    (address, cg_layer) -> Task, pour l'auto-remove differe apres stop()).
+    (address, cg_layer) -> Task, pour l'auto-remove differe apres stop()),
+    last_ping_ms (float | None - temps d'aller-retour du dernier PING/PONG
+    reussi, mesure directement dans ping() autour de l'ecriture/lecture
+    existantes ; None tant qu'aucun ping n'a reussi. Affiche au survol du
+    statut CASPAR CG du header, voir 6.1 - demande explicite de
+    l'utilisateur).
 
 4.3 Fonctions internes/techniques (prefixees _, ou non destinees a un
     usage direct depuis le reste du logiciel) :
@@ -255,6 +269,51 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
       jour avec succes.
     - remove_template(channel, layer=None, cg_layer=1) : CG REMOVE
       (retire completement le producer, contrairement a stop()).
+    - invoke_template(channel, function, layer=None, cg_layer=1) : CG
+      INVOKE - appelle une fonction/methode DEJA EXPOSEE par le template
+      charge sur ce channel/layer/cg_layer (ex: une animation JS nommee
+      d'un template HTML), sans toucher au producer lui-meme (pas d'ADD/
+      REMOVE/UPDATE). Demande explicite de l'utilisateur, verifiee auprès
+      de la doc AMCP officielle avant implementation (l'utilisateur a
+      specifiquement demande de verifier plutot que de faire confiance a
+      la memoire du modele - bon reflexe, une premiere version avait
+      entoure `function` de guillemets par analogie avec CG ADD/UPDATE) :
+      la syntaxe reelle est "CG [channel]-[layer] INVOKE [cg_layer]
+      [method]" avec `method` en token NU, SANS guillemets (exemple
+      officiel : "CG 1-1 INVOKE 1 start_intro", source server/docs/
+      source/amcp/template-graphics-commands.rst du repo CasparCG) -
+      `function` ne doit donc jamais contenir d'espace. Utilise par
+      SceneButton.invoke_all_pgm() (voir section 7) pour le bouton
+      SPONSOR IN du footer (voir 6.3).
+
+      BUG REEL RENCONTRE ET CORRIGE juste apres la mise en prod de
+      SPONSOR IN : "je ne suis plus connecte a casparCG une fois que
+      j'appuye sur le bouton". Root-cause CONFIRMEE en lisant le CODE
+      SOURCE OFFICIEL de CasparCG (github.com/CasparCG/server, src/
+      protocol/amcp/AMCPCommandsImpl.cpp) : CG INVOKE renvoie le code
+      201 ("execute, PLUS UNE LIGNE de donnee" - le resultat de l'appel
+      JS), PAS 202 comme CG ADD/PLAY/STOP/REMOVE/CLEAR/UPDATE (deja
+      utilises partout ailleurs dans ce fichier, "execute, aucune donnee
+      supplementaire" - c'est pourquoi ce bug etait reste invisible
+      jusqu'ici, invoke_template etant la toute PREMIERE commande 201
+      jamais envoyee par ce logiciel). _read_response() ne savait lire
+      des lignes supplementaires QUE pour le code 200 (bloc termine par
+      une ligne vide) - la ligne de donnee du code 201 restait donc NON
+      LUE dans le tampon TCP, decalant la lecture de TOUTES les reponses
+      suivantes d'une ligne. Consequence observee : le PING PERIODIQUE
+      suivant (_ping_loop, toutes les 5s) lisait cette ligne perimee au
+      lieu de "PONG", ping() renvoyait donc False, et self.connected
+      passait a False - exactement le symptome signale, quelques
+      secondes apres l'appui sur SPONSOR IN.
+      CORRIGE dans _read_response() : le code 201 lit maintenant
+      EXACTEMENT UNE ligne de donnee supplementaire (pas de boucle
+      jusqu'a une ligne vide, contrairement au 200). Verifie avec un
+      faux serveur TCP reproduisant EXACTEMENT le format reel de
+      CasparCG ("201 CG OK\r\n" + resultat + "\r\n") : invoke_template
+      lit bien les 2 lignes, la commande suivante n'est plus decalee, et
+      un ping() juste apres continue de repondre correctement (y compris
+      apres 2 CG INVOKE consecutifs, pour ecarter tout decalage
+      cumulatif).
     - stop(channel, layer=None, cg_layer=1) : CG STOP, puis programme un
       CG REMOVE automatique 5s plus tard (annulable, voir 4.3).
     - clear(channel, layer=None) : CLEAR generique (retire N'IMPORTE quel
@@ -309,16 +368,35 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     Etat expose : latest_data (dict JSON brut du dernier message de
     chronometrage complet), config (SimpleNamespace), event_infos
     (SimpleNamespace), timing_data (dict[str, SimpleNamespace] cle =
-    dossard), connected (bool).
+    dossard), connected (bool), last_ping_ms (float | None - temps
+    d'aller-retour du dernier ping/pong WebSocket NATIF reussi (frame de
+    controle, pas un message de donnees), mesure par _ping_loop toutes
+    les _ping_interval=5.0s ; None tant qu'aucun ping n'a reussi. Affiche
+    au survol du statut WS DATA du header, voir 6.1 - demande explicite
+    de l'utilisateur : "si c'est pas trop complique, le ping". _ping_loop
+    tourne en TACHE SEPAREE de _receive_loop (occupee a iterer les
+    messages entrants) - la bibliotheque `websockets` gere ping/pong
+    independamment des frames de donnees sur la meme connexion, verifie
+    reellement (serveur de test local, receive_loop et ping_loop actifs
+    en meme temps sans interference) plutot que suppose).
 
 5.2 Fonctions publiques :
     - connect() : ouvre la connexion websocket, DEMARRE TOUJOURS la
       boucle de fond _receive_loop meme si la premiere tentative echoue
       (meme logique que CasparCG.connect(), pour retenter automatiquement
-      un serveur de donnees indisponible au demarrage).
+      un serveur de donnees indisponible au demarrage) - demarre aussi
+      _ping_loop (voir plus haut).
     - disconnect() : annule _receive_task, ferme la connexion.
     - change_ip(ip, port=None) : met a jour l'adresse ; si deja connecte,
       se deconnecte puis se reconnecte a la nouvelle adresse.
+    - on_message(callback) : abonne callback (fonction synchrone, sans
+      argument) - appele des qu'un nouveau message complet est traite
+      avec succes (voir _handle_message). Voir scene_button.py section
+      "Rafraichissement instantane sur nouvelle donnee".
+    - remove_listener(callback) : desabonne callback (sans erreur si deja
+      absent) - a appeler quand l'abonne n'a plus besoin d'etre notifie
+      (ex: page/client ferme), self etant un singleton partage entre
+      tous les clients.
 
 5.3 Fonctions internes :
     - _receive_loop() : boucle unique de fond, meme principe que
@@ -337,7 +415,10 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
         2. Si le dict resultant contient les cles "config", "event_infos"
            ET "timing_data", c'est un snapshot COMPLET de chronometrage
            (pas un delta) : latest_data, config, event_infos et
-           timing_data sont remplaces integralement.
+           timing_data sont remplaces integralement, PUIS chaque
+           callback abonne via on_message() est appele (try/except
+           individuel - voir 5.2 et section "Rafraichissement instantane
+           sur nouvelle donnee" de scene_button.py).
         3. D'AUTRES TYPES DE MESSAGES passent sur le meme WebSocket
            (confirme par l'utilisateur) mais ne sont PAS encore geres :
            ils sont ignores silencieusement pour l'instant. A implementer
@@ -381,6 +462,59 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     - Titre de l'epreuve (data.event_infos.TITLE) et nom de la course
       (data.event_infos.EVENT_NAME, en gras), meme taille de police,
       separes par un tiret.
+
+    PIEGE MAJEUR CORRIGE - le header passait sur PLUSIEURS LIGNES des que
+    son contenu total (logo+titre+nom d'evenement a gauche, boutons+
+    statuts+horloges a droite) depassait la largeur de la fenetre,
+    obligeant l'operateur a DEZOOMER LE NAVIGATEUR pour tout faire tenir
+    de nouveau sur une seule ligne - demande explicite de l'utilisateur :
+    "scaler le titre afin que le header tienne toujours en une seule
+    ligne sans avoir a dezoomer". Root-cause : ui.header() ET ui.row() de
+    NiceGUI passent TOUS LES DEUX a la ligne PAR DEFAUT (wrap=True
+    implicite, voir nicegui/elements/header.py/row.py - `wrap` n'est PAS
+    juste une classe CSS optionnelle, c'est un parametre du CONSTRUCTEUR
+    qui ajoute/omet la classe permettant le flex-wrap), jamais neutralise
+    jusqu'ici sur AUCUNE des rangees du header.
+    CORRIGE en 2 temps :
+    1) wrap=False EXPLICITE sur TOUTES les rangees du header (ui.header()
+       lui-meme, la rangee de gauche logo/titre/evenement, la rangee des
+       boutons d'icones/actions a droite, la rangee des 2 horloges) - plus
+       aucun retour a la ligne possible nulle part dans le header.
+    2) Le groupe de DROITE (boutons+statuts+horloges, tous critiques pour
+       le pilotage) reste a taille FIXE (flex-shrink: 0, en style inline -
+       pas de classe Tailwind stable garantie entre versions pour
+       "flex-shrink-0"/"shrink-0") : c'est le groupe de GAUCHE qui absorbe
+       SEUL le manque de place. Panneau titre logiciel ET rangee titre
+       epreuve/nom d'evenement : "flex-1 min-w-0" (peuvent retrecir sous
+       leur largeur naturelle, contrairement au comportement flex par
+       defaut ou min-width:auto empeche tout retrecissement en dessous du
+       contenu) + police en clamp() pour le titre logiciel (retrecit
+       progressivement avec la largeur de fenetre, jamais au-dela de sa
+       taille d'origine 18px/1.125rem) + "truncate" (points de suspension)
+       en dernier recours sur les 3 textes variables (titre logiciel,
+       titre epreuve, nom d'evenement) si meme la taille minimale ne
+       suffit pas - GARANTIT que le header ne repasse plus jamais sur
+       plusieurs lignes, quelle que soit la longueur des textes.
+    PIEGE DE MISE AU POINT reellement rencontre : donner flex-1 min-w-0
+    SEULEMENT au panneau titre logiciel (en laissant la rangee titre
+    epreuve/nom d'evenement a son flex-basis:auto par defaut) ne partage
+    PAS equitablement l'espace manquant entre les deux - celle a
+    flex-basis:auto garde la priorite sur son propre contenu et ecrase
+    l'AUTRE jusqu'a 0px de large plutot que de retrecir elle-meme. Corrige
+    en donnant le MEME traitement (flex-1 min-w-0 sur la rangee, truncate
+    sur chaque label) aux DEUX panneaux, qui se partagent alors l'espace
+    restant plus equitablement. Verifie par mesure DOM ET capture d'ecran
+    (protocole DevTools de Chrome, simulation de plusieurs largeurs de
+    fenetre via Emulation.setDeviceMetricsOverride) : hauteur du header
+    CONSTANTE (une seule ligne) de 800px a 1920px de large, avec des
+    titres/nom d'evenement volontairement tres longs en test de stress -
+    a 1920px (largeur realiste d'un poste de regie), titre logiciel
+    entierement lisible et nom d'evenement tronque proprement ; a des
+    largeurs plus etroites (dev/test), le texte variable retrecit
+    fortement pour laisser la priorite aux boutons de pilotage fixes -
+    compromis attendu et accepte (le groupe de droite ne doit JAMAIS
+    perdre de la place, il n'y a que le texte cosmetique qui cede).
+
     - Bouton icone "settings" (rond, contour slate) : ouvre settings_dialog
       (voir plus bas).
     - Bouton "EMERGENCY ALL OUT" (contour rouge, fond rouge legerement
@@ -428,9 +562,39 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     - Titre du logiciel (ui.input).
     - IP/port du serveur de donnees WebSocket, IP/port CasparCG, numero de
       channel preview et programme (ui.input/ui.number).
+    - Regroupement des categories (voir 7, "Restriction par sexe/
+      categorie") : glisser-deposer, PAS un formulaire valide par
+      "Enregistrer" (voir plus bas), et PAS dans la boite de dialogue
+      Parametres elle-meme (voir PIEGE MAJEUR 8.12) - accessible via un
+      bouton "Regroupement des categories..." AU SEIN de Parametres, qui
+      ferme Parametres et ouvre un panneau separe. HISTORIQUE : une
+      premiere version utilisait 10 cases a cocher par PAIRE de CATEGORIES
+      fixes (app_config.CATEGORY_PAIRS, supprime depuis), validees par
+      "Enregistrer" comme le reste de la boite de dialogue ; remplacee a
+      la demande explicite de l'utilisateur ("je veux pouvoir creer des
+      groupe en glissant deposant les categories... grouper 1, 2, 3...
+      autant que je veux de categories") par un glisser-deposer libre
+      (SortableJS via element.make_sortable(), *NiceGUI 3.11+*) : une
+      "boite" (ui.row.make_sortable(group="category_groups", on_end=...))
+      par groupe, contenant les puces (ui.chip) des categories qui en font
+      partie ; toutes les boites partagent le meme group= pour permettre
+      le glisser ENTRE boites (pas seulement reordonner dans une meme
+      boite) ; "+ Nouveau groupe" ajoute une boite vide (pour en extraire
+      une categorie sur son propre groupe) ; une boite videe par un
+      glisser est retiree automatiquement. Autant de categories que voulu
+      dans un meme groupe (pas limite a des paires, contrairement a
+      l'ancienne UI). on_category_group_sort_end() (le callback on_end)
+      relit l'etat de TOUTES les boites (categorie de chaque puce, dans
+      l'ordre, via box.default_slot.children) pour reconstruire
+      category_groups, l'applique ET le persiste INSTANTANEMENT a chaque
+      deplacement (pas d'attente du clic sur "Enregistrer") via
+      SceneButton.set_category_groups (voir 7) - une manipulation directe
+      comme le drag-and-drop n'appelle pas de bouton de validation separe,
+      contrairement au reste des Parametres.
     on_settings_save() : met a jour le dict `config` (valeur vide/nulle
     d'un champ -> garde l'ancienne valeur plutot que d'ecraser, protection
-    minimale), appelle app_config.save_config(config) pour persister dans
+    minimale - le regroupement des categories N'EN FAIT PLUS PARTIE, voir
+    ci-dessus), appelle app_config.save_config(config) pour persister dans
     config.json, PUIS applique tout immediatement (dark_mode.set_value,
     apply_body_background, software_title_label.text) et reconnecte en
     direct data.change_ip(...) et caspar.change_connection(...) - sans
@@ -440,15 +604,175 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
     parametres restent quand meme enregistres - la reconnexion se fera
     seule via les boucles de fond _ping_loop/_receive_loop habituelles).
 
-6.2 build_body(caspar, data)
+    Autres elements du header (ajoutes apres la 1ere version documentee
+    ci-dessus) :
+    - Bouton icone "fullscreen"/"fullscreen_exit" (ui.fullscreen(), API
+      Fullscreen du navigateur) - icone synchronisee via bind_icon_from
+      dans les 2 sens (notre bouton, ou sortie independante par Echap/F11).
+    - Bouton icone "data_object" : ouvre une boite de dialogue avec 3
+      onglets (Config course/Infos evenement/Timing data) affichant
+      data.latest_data BRUT (pas les SimpleNamespace assainies) via
+      ui.json_editor (vue arborescente repliable, readOnly=True), rafraichie
+      par le meme ui.timer(1.0, update_header) mais seulement pendant que
+      la boite est ouverte.
+    - Initialisation directe (pas via les setters async, voir 7) de
+      SceneButton._restrict_by_sex/_restrict_by_cat/_category_groups
+      depuis `config` - build_header s'execute AVANT build_body, aucun
+      SceneButton n'existe encore, une simple affectation suffit.
+      config["category_groups"] = app_config.normalize_category_groups(...)
+      PUIS save_config(config) immediat (pas juste en memoire) : garantit
+      qu'un regroupement deja configure survit a la migration de l'ancien
+      format (voir app_config.load_config/_migrate_category_group_links
+      plus bas) des le tout premier demarrage post-mise a jour, sans
+      attendre que l'operateur pense a rouvrir Parametres.
+    - Bouton "TEST PATTERN" (a cote de EMERGENCY ALL OUT) - demande
+      explicite de l'utilisateur : outil de calibration technique
+      independant de templates.json, sur un layer video DEDIE
+      (TEST_PATTERN_LAYER = 900, constante module-level, distinct des
+      layers 10-30 utilises par les vrais boutons - jamais de conflit).
+      on_test_pattern_click() :
+        - Inactif -> clic : boite de dialogue de confirmation (`await
+          dialog`, voir piege 8.7) AVANT tout envoi ; si confirme,
+          caspar.play_template() sur "prw" ET "pgm" SIMULTANEMENT, meme
+          template (TEST_PATTERN_TEMPLATE = "test_pattern"), mais un
+          _label DIFFERENT par channel ("GFX PRW" / "GFX PGM") pour
+          reperer lequel est lequel a l'ecran - exigence explicite.
+        - Actif -> clic : PAS de confirmation cette fois (seul l'envoi
+          initial est juge assez consequent pour la demander) - clear()
+          direct sur "prw" ET "pgm" (layer=TEST_PATTERN_LAYER).
+      Etat visuel : TEST_PATTERN_IDLE_CLASSES/TEST_PATTERN_ACTIVE_CLASSES
+      (2 constantes module-level), basculees via test_pattern_button.
+      classes(replace=...) - la version active ajoute "animate-pulse"
+      (Tailwind) : "je veux que le bouton reste enclenche et clignote
+      quand il est enclenche".
+      _test_pattern_active (dict module-level, PAS une variable locale de
+      build_header) : survit a un rechargement de page, comme SceneButton.
+      _active_pgm/_active_preview (voir 7) - si l'operateur recharge la
+      page pendant que le test pattern est reellement toujours a
+      l'antenne sur CasparCG, le bouton doit rester affiche "enclenche"
+      des sa (re)construction plutot que de revenir a tort a l'etat
+      inactif par defaut.
+      Teste de bout en bout (protocole DevTools de Chrome, CasparCG
+      simule via un FakeCaspar enregistrant chaque appel) : dialogue de
+      confirmation avant le premier envoi, les 2 play_template (prw+pgm,
+      _label distinct, layer 900) partent bien simultanement a la
+      confirmation, le bouton passe au style actif (animate-pulse, sans
+      "bg-primary" residuel de Quasar - necessite color=None sur le
+      bouton "Envoyer" du dialogue, sinon la couleur Quasar par defaut
+      l'emporte visuellement sur la classe Tailwind bg-orange-600, meme
+      piege que les boutons d'icones du header qui passent deja tous
+      color=None), le second clic clear bien prw ET pgm SANS redemander
+      de confirmation, et le bouton revient au style inactif.
+    - Bouton "LOGO TICKER" (a cote de TEST PATTERN) - demande explicite
+      de l'utilisateur : afficher un bandeau logo defilant (template
+      "bx_ticker") a l'ecran. Meme squelette que TEST PATTERN (layer
+      dedie LOGO_TICKER_LAYER = 901, etat "enclenche" persistant hors
+      build_header via _logo_ticker_active, classes IDLE/ACTIVE avec
+      animate-pulse), mais volontairement PLUS SIMPLE : un seul channel
+      ("pgm" uniquement - un bandeau est fait pour rester visible a
+      l'antenne en continu, pas prepare en preview au prealable) et SANS
+      boite de confirmation (contrairement a TEST PATTERN, un bandeau
+      logo n'a pas le meme enjeu qu'une mire de calibration - clic pour
+      afficher, reclic pour retirer, immediatement).
+      Teste de bout en bout (FakeCaspar) : 1er clic -> play_template
+      ("pgm", "bx_ticker", layer=901, cg_layer=1), bouton passe cyan +
+      animate-pulse ; 2eme clic -> clear("pgm", layer=901), bouton
+      revient a l'etat inactif.
+
+      CORRECTION ulterieure - "EMERGENCY ALL OUT" (header) EFFACE le
+      ticker malgre lui : demande explicite de l'utilisateur ("le bouton
+      all out [ne doit pas] agir sur le ticker"). caspar.
+      emergency_all_out() fait un CLEAR SANS layer precis sur "prw" ET
+      "pgm" (vide ENTIEREMENT les 2 channels, tous producers confondus) -
+      le ticker (layer 901, HORS SceneButton) y passe donc aussi, a la
+      difference du bouton ALL OUT du FOOTER (SceneButton.stop_all_pgm,
+      qui ne touche que les boutons de la grille - le ticker n'y est deja
+      pas expose, aucun changement necessaire de ce cote). CORRIGE dans
+      on_emergency_click() (pas dans casparcg.py - emergency_all_out()
+      reste un CLEAR generique, sans connaissance du ticker) : si
+      _logo_ticker_active["value"] est vrai, rejoue immediatement
+      play_template("pgm", "bx_ticker", layer=901) juste apres le clear,
+      restaurant l'affichage - le ticker "survit" donc a l'emergency all
+      out du point de vue de l'operateur, sans jamais avoir vraiment
+      disparu longtemps. Teste de bout en bout (FakeCaspar) : sequence
+      exacte des appels confirmee -> play_template (activation) -> clear
+      prw -> clear pgm (emergency) -> play_template (restauration
+      automatique) - bouton reste visuellement actif (cyan+animate-pulse)
+      tout du long.
+    - Tooltip IP + ping au survol des statuts CASPAR CG / WS DATA (voir
+      _build_status_box/_apply_status) - demande explicite de
+      l'utilisateur : "quand on passe la souris sur les status de
+      connexion on puisse voir l'ip [...] et [...] le ping". Le tooltip
+      (ui.tooltip, cree dans _build_status_box, texte mis a jour par
+      _apply_status a chaque tick de update_header comme le reste du
+      statut) affiche "ip:port" et, si disponible, " - ping X ms".
+      caspar.last_ping_ms/data.last_ping_ms (voir sections 4/5) sont
+      calcules cote CasparCG/BiathDataWebsocket, pas ici - build_header
+      se contente de les lire et de les formater.
+      Teste de bout en bout (protocole DevTools de Chrome, survol REEL via
+      Input.dispatchMouseEvent) : tooltip affichant "192.168.1.50:5250 -
+      ping 4 ms" pour CasparCG.
+
+6.2 build_body(caspar, data, config)
     Corps de page. Voir section 2 (description du fichier interface.py)
     pour le detail a jour : 3 conteneurs empiles (PRE RACE/RACE/POST
     RACE), grille CSS ligne/colonne par conteneur, boutons lus depuis
-    templates.json.
+    templates.json. `config` (ajoute avec la fonctionnalite de restriction
+    par sexe/categorie, voir 7) permet a add_restrict_controls (plus bas)
+    de lire/persister l'etat des 2 cases a cocher globales.
 
-6.3 build_footer(caspar, data)
+    _get_or_create_cell(section, row, column) factorise la logique
+    (jusque-la dupliquee dans add_button) de recuperation/creation d'une
+    case de la grille CSS - reutilisee par add_button ET
+    add_restrict_controls (voir plus bas), plusieurs elements sur la
+    meme case s'empilent verticalement. Coercion defensive int(row)/
+    int(column) (voir PIEGE ci-dessous, distinct de celui sur `config`) -
+    templates.json etant edite a la main, ces valeurs finissent facilement
+    en string (ex: "1" au lieu de 1), ce qui plantait `row + 1`
+    (TypeError, bug reel rencontre sur une entree _restrict_controls
+    reelle de l'utilisateur). add_column_title fait la meme coercion sur
+    `column` (n'utilise pas _get_or_create_cell, chemin de code separe).
+
+    add_restrict_controls(section, column) - PAS de parametre "row" :
+    place, dans la colonne choisie par templates.json (entree
+    "_restrict_controls": true, voir buttons_config.py), les 2 cases a
+    cocher globales "restreindre par sexe"/"par categorie" - un peu comme
+    un titre de colonne ou un bouton, PAS fixe dans le header (exigence
+    explicite de l'utilisateur : "on peut choisir ou placer le
+    conteneur"). row FORCE a 1 en interne (_get_or_create_cell(section, 1,
+    column)), un "row" present dans l'entree JSON est ignore silencieusement
+    - CORRECTION suite a une demande explicite de l'utilisateur : "fait en
+    sorte que les case a cocher de restrict soit forcement en haut dans la
+    pile d'element de la colonne, juste en dessous du titre". Pour que ce
+    soit vrai MEME quand un bouton partage la meme case (row=1) que ces
+    cases a cocher (l'empilement dans une case suit l'ordre d'INSERTION,
+    pas le contenu), _restrict_controls est traite EN PREMIER dans
+    build_body, avant la boucle des boutons (voir plus bas) - garantit que
+    ces cases sont toujours le tout premier enfant de leur case. Chaque
+    case, au changement, persiste dans config.json (save_config) ET
+    appelle immediatement SceneButton.set_restrict_by_sex/
+    set_restrict_by_cat (voir 7) pour repercuter le changement sur tous
+    les boutons concernes deja a l'ecran.
+
+    PIEGE EVITE (pas un bug rencontre, anticipe des la conception) : la
+    boucle de chargement des boutons utilisait "for config in
+    load_button_configs(...)" - un nom qui ecraserait, pour le reste de la
+    fonction (une boucle for ne cree pas de portee propre en Python), le
+    parametre `config` (dict de reglages applicatifs) fraichement ajoute a
+    build_body, cassant add_restrict_controls des que cette boucle a
+    tourne au moins une fois. Renommee en "button_config" en meme temps
+    que l'ajout du parametre `config`.
+
+6.3 build_footer(caspar, data, config, footer_hooks)
     Pied de page (ui.footer), meme style que le header (bg-slate-900,
-    m-3, rounded-2xl). Actions globales, independantes de quel(s)
+    m-3, rounded-2xl). `config`/`footer_hooks` ajoutes avec la ligne de
+    progression de course (voir 6.3bis). flex-col EXPLICITE sur le
+    ui.footer() lui-meme (Quasar QFooter est en ligne par defaut) : la
+    section progression (optionnelle, au-dessus) et la rangee de boutons
+    ci-dessous (dans un ui.row() imbrique desormais, inchangee sinon)
+    doivent s'empiler VERTICALEMENT.
+
+    Actions globales, independantes de quel(s)
     bouton(s) ont envoye ce qui est actuellement affiche :
     - "ALL OUT" (contour orange) : SceneButton.stop_all_pgm() - stoppe
       (CG STOP classique, meme mecanisme que le survol "OUT" de chaque
@@ -457,9 +781,219 @@ dans les chemins d'execution). Version de CasparCG testee : 2.3.1-lts-stable.
       DIFFERENT de "EMERGENCY ALL OUT" (header) qui fait un CLEAR
       immediat des deux channels entiers (tout producer, pas seulement
       les boutons CG, sans animation de sortie).
-    - "CLEAR PRW" (contour jaune) : caspar.clear("prw", layer=1) puis
-      SceneButton.reset_preview_button() pour resynchroniser l'affichage
-      du bouton qui occupait la preview.
+    - "CLEAR PRW" (contour jaune) : SceneButton.clear_all_previews() -
+      clear TOUS les slots de preview actuellement actifs (voir section
+      7/8.11, multi-slot) et resynchronise les boutons concernes.
+    - "TAKE PREVIEW" (contour vert) : SceneButton.take_all_previews() -
+      Take (vers le programme) de CHAQUE bouton actuellement en preview,
+      pas un seul (permet d'envoyer plusieurs graphiques pre-composes au
+      programme d'un coup, voir 8.11).
+    - "SWAP" (contour bleu) : SceneButton.swap_preview_pgm() - comme TAKE
+      PREVIEW, mais renvoie en plus en preview le graphique au programme
+      echange (echange complet). Appariement preview<->pgm PAS par
+      (layer, cg_layer) identique (voir section 7, bug reel rencontre) -
+      un swap se fait normalement entre 2 boutons DIFFERENTS.
+    - "SPONSOR IN" (contour violet, icone "loyalty") : SceneButton.
+      invoke_all_pgm("sponsor_in") - demande explicite de l'utilisateur.
+      Invoque (CG INVOKE, voir 4.4) la fonction "sponsor_in" deja exposee
+      par le template sur TOUS les boutons actuellement au programme
+      (second_cg compris s'il y en a), sans toucher au producer lui-meme -
+      contrairement aux 4 autres actions du footer, ne joue/stoppe/clear
+      rien, se contente d'appeler une fonction que le template affiche
+      DEJA (typiquement une animation d'incrustation de sponsor). Ecrit
+      de facon generique (le nom de la fonction est un parametre de
+      invoke_all_pgm(), pas cable en dur dans SceneButton) pour rester
+      reutilisable si d'autres boutons du meme type sont ajoutes plus
+      tard.
+
+6.3bis Ligne de progression de course (footer, au-dessus des boutons)
+    Demande explicite de l'utilisateur : une ligne DEPART -> intermediaires
+    -> ARRIVEE, avec des puces indiquant le leader general, le leader de
+    chaque categorie/sexe, et un "potentiel nouveau leader". Activable/
+    desactivable dans Parametres ("Afficher la progression de la course",
+    False par defaut - fonctionnalite purement additive mais pas
+    d'affichage surprise a la premiere mise a jour). Volontairement
+    COMPACTE EN HAUTEUR (~40px, meme en vue etendue - seul le NOMBRE de
+    badges change, jamais la hauteur).
+
+    race_progress.py (NOUVEAU fichier, logique PURE - aucun NiceGUI, testee
+    independamment de l'UI) :
+        - build_sequence(interorder) : sequence ordonnee des checkpoints,
+          DEDUPLIQUEE, avec des cles synthetiques _START/_FINISH ajoutees
+          en 1ere/derniere position (n'existent pas litteralement dans
+          interorder, qui ne liste que des cles C_INTER..., mais
+          l'utilisateur veut voir DEPART/ARRIVEE comme les 2 extremites de
+          la ligne).
+        - checkpoint_label(key) : libelles CONVIVIAUX specifiques a CETTE
+          ligne (INDEPENDANTS de SceneButton._INTERMEDIATE_LABELS, scene_
+          button.py - meme donnees brutes, textes differents, exigence
+          explicite de l'utilisateur) : _START->"DEPART", _FINISH->
+          "ARRIVEE", C_INTERINSHOOT{n}->"ENTREE TIR {n}", C_INTERSHOOT{n}
+          ->"SORTIE TIR {n}", C_INTERSLOPE{n}->"INTER TOUR {n}", C_RELAY{n}
+          ->"RELAIS {n}" (cle brute en repli si prefixe inconnu, pour ne
+          jamais planter sur un format de course inhabituel).
+        - compute_race_progress(config, timing_data) -> RaceProgress|None :
+          calcule TOUT (voir AthleteProgress/RaceProgress) :
+            - temps ecoule = DIFFERENCE avec le PROPRE C_START de chaque
+              athlete (pas le temps brut cumule depuis minuit) - necessaire
+              pour rester correct en depart decale (ex: INDIVIDUAL), sinon
+              comparer des temps bruts entre athletes a depart different
+              n'aurait aucun sens.
+            - athletes exclus : C_STATUS "DNS"/"DNF", ou C_START invalide
+              (pas encore parti).
+            - position actuelle d'un athlete = le checkpoint le PLUS AVANCE
+              de la sequence pour lequel il a une valeur > 0 ("0 = non
+              atteint", voir biathdata_reference.txt).
+            - LEADER : le plus avance, le plus rapide en cas d'egalite.
+            - 1ER <CATEGORIE>/1ER H/1ER D : meme calcul, restreint au
+              groupe (5 CATEGORIES fixes + 2 sexes).
+            - NOUVEAU LEADER ? (exigence LITTERALE de l'utilisateur :
+              "celui qui pour son dernier intermediaire connu est sorti
+              avec la position de premier") : parmi tous SAUF le leader
+              general, celui classe 1er au classement de SON PROPRE
+              checkpoint actuel - c-a-d le plus rapide parmi TOUS ceux
+              ayant atteint ce meme point, y compris des athletes qui l'ont
+              depasse depuis. Signale un athlete plus rapide que quiconque
+              ne l'a ete a ce point, meme s'il n'a pas encore rejoint le
+              leader. Le plus avance des candidats est retenu en cas
+              d'egalite (menace la plus immediate).
+            - 2E/3E (podium general) : calcules dans tous les cas, mais
+              n'apparaissent QUE dans la vue etendue de l'UI (voir plus
+              bas) - un marqueur purement 2E/3E (sans LEADER/1ER*/NOUVEAU)
+              est filtre en vue compacte.
+          Renvoie None tant qu'il n'y a rien a afficher (pas de config.
+          interorder, ou aucun athlete eligible) - l'appelant doit alors
+          ne rien afficher plutot qu'une ligne vide.
+        - format_elapsed(ms) : mm:ss (ou h:mm:ss au-dela d'une heure),
+          affichage uniquement (tooltips).
+        - Teste par ~25 assertions unitaires (donnees synthetiques
+          couvrant : leader general, leaders categorie/sexe, potentiel
+          nouveau leader avec depart decale, exclusion DNS/DNF/pas-parti,
+          podium, cas limites config/timing_data absents) - toutes OK.
+
+    interface.py (_build_race_progress_section, dans build_footer) :
+        - Rendu (V2 - encarts permanents + ligne coloree, suite a une
+          demande explicite de l'utilisateur : "affiche sur la ligne dans
+          des encart [...] le nom des intermediraire, [...] la ligne se
+          colore au fur et a mesure en fonction de la progression"). La V1
+          (puce discrete + tooltip au survol pour le libelle) est
+          ABANDONNEE - les libelles doivent rester visibles en permanence.
+          Structure : un div "w-full overflow-x-auto" (defilement
+          horizontal) contenant line_container (position relative,
+          height:84px fixe - augmentee depuis 64px pour laisser la place au
+          nom de l'athlete sous chaque badge, voir plus bas -, min-width
+          calcule = max(700, len(sequence)*90) px - assez de place pour des
+          libelles toujours visibles meme sur un format avec beaucoup
+          d'intermediaires, ex: INDIVIDUAL).
+            - ligne de base (top:54px) : 2 segments superposes, un gris
+              (bg-slate-700, toute la largeur) et un colore (bg-emerald-500,
+              "transition-all duration-500" pour une animation fluide d'un
+              rafraichissement a l'autre) dont la largeur = position du
+              LEADER GENERAL (role "LEADER") le long de la sequence - "si
+              un athlete est deja passe a l'inter, on colorie jusqu'a
+              l'inter" (exigence litterale).
+            - un encart par checkpoint (top:56px, TOUJOURS visible, pas un
+              tooltip) : petit pill text-[9px] avec le libelle convivial
+              (checkpoint_label), colore emerald (deja atteint par le
+              leader, index <= leader.index) ou gris (pas encore atteint).
+              Cas particulier ENTREE/SORTIE TIR (demande explicite
+              ulterieure : "pour les entrée et sortie de tir un icon de
+              flehce entrentte ou sortante et une petite cible") : icone
+              "track_changes" (cible) + icone "login"/"logout" (fleche
+              entrante/sortante) ajoutees AVANT le texte du libelle,
+              detectees sur la CLE BRUTE du checkpoint (_key.startswith
+              ("C_INTERINSHOOT")/("C_INTERSHOOT") - PAS le libelle deja
+              traduit) pour rester correct quel que soit le texte affiche.
+              Centre sur sa position (index/(N-1)*100%) via
+              transform:translate(-50%,0), SAUF aux 2 EXTREMITES (DEPART a
+              0%, ARRIVEE a 100%) qui sont ANCREES vers l'interieur
+              (translate(0,0) / translate(-100%,0)) plutot que centrees -
+              piege reel rencontre et corrige : un encart centre pile sur
+              0%/100% deborde pour moitie hors du conteneur defilant et se
+              retrouve tronque ("DEPART"/"ARRIVEE" affiches "ART"/"ARR"),
+              confirme visuellement puis corrige (meme logique d'ancrage
+              appliquee aux badges d'athletes ci-dessous, pour la meme
+              raison).
+            - badges d'athletes AU-DESSUS des encarts (top:2px contre
+              top:56px pour les encarts) - positionnement horizontal
+              identique a la V1 (etales horizontalement si plusieurs au
+              meme checkpoint, jamais verticalement - ecart entre badges
+              porte de 26 a 50px, voir plus bas), memes regles d'ancrage
+              aux extremites. Chaque badge est desormais une colonne
+              flex (largeur fixe 48px) : le cercle icone/numero (inchange),
+              PUIS le nom de l'athlete en texte en dessous (text-[8px],
+              tronque avec ellipse si trop long plutot que de deborder sur
+              le badge voisin) - demande explicite ulterieure ("ajouter en
+              plus de l'icone un texte pour l'athlete"), le nom restait
+              auparavant visible uniquement dans le tooltip au survol.
+              L'ecart entre badges d'un meme checkpoint est passe de 26 a
+              50px pour cette raison (2 noms text bien plus larges qu'un
+              simple cercle de 24px se chevauchaient sinon).
+        - _race_progress_badge_style(roles) : couleur/icone du badge selon
+          le role le PLUS IMPORTANT (LEADER=or+trophee "emoji_events" >
+          NOUVEAU LEADER ?=orange+pulse "trending_up" > 1ER <cat/sexe>=bleu
+          (bib affiche, pas d'icone) > 2E=argent+medaille > 3E=bronze+
+          medaille) - 2E/3E utilisent l'icone "military_tech" (demande
+          explicite ulterieure : "met pour le point du deuxieme et du
+          troisieme une medaille de bronze et d'argent") ; la meme icone
+          sert aux 2 places, seule la couleur de fond du badge (deja
+          existante : slate/argent pour 2E, amber/bronze pour 3E) distingue
+          le metal. Tous les roles cumules restent listes dans le tooltip
+          (au survol du BADGE uniquement, pas des encarts de checkpoint qui
+          eux n'ont plus de tooltip - leur libelle est deja visible en
+          permanence).
+        - Couleur des encarts de checkpoint PAR TYPE (demande explicite
+          ulterieure : "met les entrée de tir en rouge, les sorties en vert
+          et les inter de piste en gris") - detectee sur la cle brute
+          (_key.startswith(...), meme technique que pour les icones
+          cible/fleche) : C_INTERINSHOOT* (entree tir) = rouge, C_INTERSHOOT*
+          (sortie tir) = vert (deja la couleur "atteint" existante), C_
+          INTERSLOPE* (inter de piste/boucle) = gris. DEPART/ARRIVEE/RELAIS
+          (non vises par la demande) gardent l'ancien code couleur "atteint
+          par le leader general (vert) / pas encore atteint (gris)" - la
+          couleur par TYPE remplace la couleur par PROGRESSION uniquement
+          pour ces 3 types, la progression globale reste visible via le
+          segment colore de la ligne de base (voir plus haut).
+        - refresh() : vide + reconstruit ENTIEREMENT line_container a
+          chaque appel (le NOMBRE/la position des badges change, pas
+          seulement leur texte - plus simple/robuste qu'un diff manuel),
+          recalcule et repose le min-width a chaque fois (voir Style.
+          __call__ dans nicegui/style.py : .style(add=...) FUSIONNE avec le
+          style existant, n'ecrase pas le height deja pose a la
+          construction - confirme en lisant le code source avant
+          d'implementer). Ne fait rien si le conteneur est actuellement
+          masque (voir plus bas). Bascule vue compacte/etendue via une
+          icone chevron (expand_more/expand_less) cliquable - filtre les
+          marqueurs purement 2E/3E en vue compacte, sans jamais changer la
+          hauteur.
+        - Rafraichissement : data.on_message(refresh) (INSTANTANE, meme
+          mecanisme que SceneButton._subscribe_to_new_data) + ui.timer(1.0,
+          refresh) en filet de securite (coherent avec le reste du fichier).
+        - Activation/desactivation en direct SANS redemarrer, comme le
+          reste des Parametres : footer_hooks (dict simple, cree une seule
+          fois par chargement de page dans main.py index(), voir 6.1/6.2)
+          permet a build_header (Settings, case a cocher "Afficher la
+          progression de la course") de basculer race_progress_container.
+          visible et de forcer un refresh() immediat sans coupler
+          directement les 2 fonctions. build_header s'execute AVANT
+          build_footer, mais l'appel reel (clic sur "Enregistrer") n'arrive
+          qu'apres que build_footer ait eu l'occasion de peupler
+          footer_hooks - aucun probleme d'ordre (meme raisonnement deja
+          applique a `config` pour add_restrict_controls, voir 6.2).
+        - Teste par capture d'ecran reelle (protocole DevTools de Chrome,
+          via un mini serveur NiceGUI isole appelant directement
+          _build_race_progress_section avec de fausses donnees plutot que
+          la stack complete CasparCG/WebSocket) : encarts d'intermediaires
+          bien visibles en permanence, badges correctement positionnes
+          au-dessus, segment colore de la ligne s'arretant bien a la
+          position du leader, aucune troncature aux extremites apres
+          correction de l'ancrage, bascule compact/etendu confirmee (icone
+          chevron change bien de sens, contenu identique ici car tous les
+          athletes de test avaient deja un role affiche), etat vide
+          (placeholder "en attente de donnees d'intermediaires...")
+          confirme apres vidage des donnees, aucune regression sur les 4
+          boutons existants du footer (toujours presents, toujours bien
+          alignes).
 
 6.4 Points d'architecture NiceGUI importants (voir aussi section 8) :
     - build_header/build_body/build_footer sont appeles depuis une
@@ -572,6 +1106,18 @@ defaut = field), "options" (liste de strings, optionnelle).
       free_text passes aux SceneButton soient les MEMES objets que ceux
       contenus dans raw_configs - une mutation de l'un mute l'autre,
       necessaire pour que la persistance reflete bien l'ajout.
+      Une icone "-" (remove_circle, demande explicite ulterieure : pouvoir
+      supprimer une option deja enregistree) juste a cote du "+" supprime
+      l'option ACTUELLEMENT SELECTIONNEE dans la combo box (pas un
+      dialogue de gestion listant toutes les options - reutilise la
+      selection deja faite par l'operateur) : _on_remove_free_text_option
+      notifie ("Selectionnez d'abord...") si rien n'est selectionne, sinon
+      demande confirmation (petite boite de dialogue Annuler/Supprimer,
+      contrairement a l'ajout qui n'a pas besoin de confirmation - une
+      suppression fait perdre l'option pour de bon) avant de retirer la
+      valeur de free_text["options"] et de rafraichir select_widget.
+      options, puis appelle self._on_config_changed() exactement comme
+      l'ajout (meme mecanisme de persistance, meme objet dict partage).
 PIEGES DEJA RENCONTRES sur cette fonctionnalite (a ne pas refaire) :
     - Un ui.select seul en mode combo box Quasar (props use-input +
       new-value-mode="add-unique") a ete essaye en premier pour a la fois
@@ -609,7 +1155,13 @@ _refresh_intermediate_options(), sur un ui.timer(1.0, ...) propre a chaque
 bouton intermediate_on, resynchronise la liste d'options en direct (utile
 car le websocket se connecte APRES la construction de l'interface -
 data.config peut valoir None au demarrage) et reinitialise la selection
-si elle n'est plus valide. La valeur choisie est poussee immediatement via
+si elle n'est plus valide. EN PLUS de ce polling (jusqu'a 1s de latence),
+_refresh_intermediate_options() est aussi appelee INSTANTANEMENT des
+qu'un nouveau message websocket complet arrive, via
+BiathDataWebsocket.on_message() (voir plus bas "Rafraichissement instantane
+sur nouvelle donnee") - utile si le logiciel de donnees demarre APRES ce
+logiciel, le tout premier message pouvant arriver a n'importe quel moment.
+La valeur choisie est poussee immediatement via
 update_template si le graphique est deja affiche (pas de capture "au
 premier play" ici, contrairement a bib_on/target_on - changer
 d'intermediaire en direct est le but recherche). Tant qu'aucun
@@ -631,14 +1183,263 @@ visuelle + logique). Une icone "block" grise apparait a cote du bouton
 format actuellement detecte. _refresh_format_availability(), sur un
 ui.timer(1.0, ...) propre a chaque bouton race_formats, revalidate chaque
 seconde (le format peut n'etre connu qu'apres coup, meme raison que pour
-intermediate_on). Omettre race_formats (None) = bouton actif pour tous les
+intermediate_on) - et, comme _refresh_intermediate_options, EGALEMENT
+appelee instantanement sur reception d'un nouveau message (voir plus bas).
+Omettre race_formats (None) = bouton actif pour tous les
 formats, comportement inchange par rapport a avant cette fonctionnalite.
 
-Un seul occupant a la fois par slot CasparCG partage entre boutons :
-    - Preview : un seul layer de preview pour tous les boutons. Mettre un
-      bouton en preview clear() de force la preview (immediat, sans
-      animation) et remet a idle (reset_to_idle()) le bouton qui
-      l'occupait avant (SceneButton._active_preview).
+Restriction par sexe/categorie (restrict_to_sex/restrict_to_cat, field_sex
+="sexe"/field_cat="cat" par defaut, tous optionnels/False) : mecanisme en
+2 parties, un etat GLOBAL + un opt-in par bouton.
+    - Etat GLOBAL (SceneButton._restrict_by_sex/_restrict_by_cat, bool) :
+      2 cases a cocher PLACEES DANS LE CORPS DE PAGE (pas le header) via
+      templates.json ("_restrict_controls": true, voir buttons_config.py/
+      interface.add_restrict_controls) - positionnement libre choisi par
+      l'operateur (section/column ; PAS de "row", TOUJOURS tout en haut de
+      la colonne - voir 6.2), comme un titre de colonne ou un bouton.
+      Persiste dans config.json (contrairement au reste de l'etat
+      en direct d'un bouton). set_restrict_by_sex(value)/
+      set_restrict_by_cat(value) (classmethods async) sont les SEULS
+      points d'entree pour changer cet etat : ils l'appliquent, rafraichissent
+      la visibilite des combo box de CHAQUE bouton concerne (voir plus bas),
+      et repoussent IMMEDIATEMENT (_update_data()) le payload de tout
+      bouton restrict_to_sex/cat=true deja a l'ecran (bib_on ou non - voir
+      correction "Opt-in par bouton" ci-dessous, la case globale seule ne
+      suffit plus a concerner un bib_on) - exactement le meme principe
+      "d'application instantanee sans redemarrage" que le reste des
+      Parametres.
+    - Regroupement des categories (SceneButton._category_groups, liste de
+      listes, ex: [["U15"], ["U17"], ["U19"], ["U21", "SEN"]]) : les 5
+      categories FIXES (app_config.CATEGORIES = U15/U17/U19/U21/SEN, pas
+      configurables) peuvent etre regroupees ARBITRAIREMENT - autant de
+      categories que voulu dans un meme groupe, pas limite a des paires -
+      en GLISSER-DEPOSER dans la boite de dialogue Parametres (voir 6.1
+      pour le detail d'implementation SortableJS). set_category_groups
+      (groups) (classmethod async, appelee par le callback on_end du
+      glisser-deposer, PAS par on_settings_save - application/persistance
+      instantanee a chaque deplacement) rafraichit les options de CHAQUE
+      combo box categorie deja construite (voir _refresh_restrict_cat_
+      options, meme principe que _refresh_intermediate_options : preserve
+      la selection si toujours valide, "ALL" sinon) et repousse
+      immediatement le payload des boutons affectes SI restrict_by_cat est
+      actuellement actif (sinon le regroupement n'a aucun effet visible,
+      inutile de repousser). app_config.normalize_category_groups(groups)
+      garantit une partition VALIDE des CATEGORIES (chacune dans
+      exactement un groupe) a chaque lecture - necessaire car
+      category_groups est une structure libre (potentiellement modifiee/
+      corrompue a la main dans config.json) ; categorie manquante -> son
+      propre groupe, doublon/categorie inconnue -> ignore (bug reel
+      rencontre en testant cette fonction : un doublon DANS LE MEME groupe
+      n'etait pas filtre par une premiere version qui mettait a jour
+      `seen` en bloc apres coup plutot qu'entree par entree).
+      HISTORIQUE : une premiere version stockait 10 cases a cocher par
+      PAIRE (app_config.CATEGORY_PAIRS, "category_group_links":
+      {"CAT_A|CAT_B": bool}, resolues en groupes via une union-find),
+      validees par le bouton "Enregistrer" comme le reste des Parametres -
+      remplacee par le glisser-deposer a la demande EXPLICITE de
+      l'utilisateur ("je veux pouvoir creer des groupe en glissant
+      deposant les categories... grouper 1, 2, 3... autant que je veux").
+      MIGRATION : app_config.load_config() detecte l'ancien format encore
+      present dans un config.json existant (et l'absence du nouveau) et le
+      convertit via _migrate_category_group_links() (meme logique
+      union-find que l'ancienne compute_category_groups(), gardee
+      uniquement pour cette migration) - necessaire pour ne pas perdre
+      silencieusement un regroupement deja configure par l'utilisateur
+      (config.json REEL rencontre avec "U15|U21": true) lors du passage a
+      la nouvelle UI ; interface.build_header sauvegarde immediatement le
+      resultat migre (pas seulement en memoire) des le demarrage, sans
+      attendre que l'operateur rouvre Parametres. PIEGE EVITE lors de
+      l'ecriture de cette migration : la condition de declenchement doit
+      verifier le contenu BRUT du fichier sur disque, pas le dict `config`
+      deja fusionne avec DEFAULT_CONFIG (qui contient TOUJOURS
+      "category_groups" via ses valeurs par defaut, meme si le fichier ne
+      l'a pas) - sinon la migration ne se declenche jamais.
+    - Opt-in par bouton - DEUX conditions doivent etre reunies pour qu'un
+      champ sexe/categorie soit envoye : restrict_to_sex/restrict_to_cat
+      dans le JSON de CE bouton ET la case a cocher globale correspondante.
+      CORRECTION REELLE (design initial rejete par l'utilisateur) : la
+      toute premiere version rendait un bib_on automatiquement/
+      inconditionnellement concerne des que la case globale etait cochee
+      (aucun reglage JSON possible/necessaire pour lui). L'utilisateur a
+      corrige explicitement : "je t'avais dit que tous les boutons avec
+      bib_on devaient... l'activer avec les champs dans le json" - un
+      bib_on doit desormais LUI AUSSI activer restrict_to_sex/
+      restrict_to_cat explicitement, un bib_on qui ne les active pas
+      n'est JAMAIS concerne, meme case globale cochee. Les classmethods
+      set_restrict_by_sex/set_restrict_by_cat/set_category_groups ont ete
+      corrigees en consequence (le test "button.bib_on or button.
+      restrict_to_sex" est devenu simplement "button.restrict_to_sex" -
+      bib_on n'est plus un raccourci qui contourne le reglage JSON). Les 2
+      cas restent neanmoins differents dans leur RENDU (combo box ou non) :
+        1) bib_on=true + restrict_to_sex/restrict_to_cat=true : PAS de
+           combo box (ce bouton connait deja l'athlete selectionne). Quand
+           la case globale correspondante est AUSSI active, _build_payload
+           calcule directement sexe/categorie depuis data.timing_data
+           [bib] (_athlete_sex_value/_athlete_cat_value) : C_SEX (1=homme
+           ->"H", 2=femme->"D", confirme par l'utilisateur - biathdata_
+           reference.txt ne confirmait que la valeur homme) et C_CATEGORY
+           resolue vers son GROUPE (jointe par ";", ex: athlete "U21"
+           regroupe avec SEN -> "U21;SEN"). Athlete/valeur introuvable ->
+           pas de restriction ("HD"/"ALL"), JAMAIS une valeur devinee a
+           tort.
+        2) bib_on=false + restrict_to_sex/restrict_to_cat=true : affiche
+           sous le bouton une combo box (Hommes/Dames/Hommes et Dames pour
+           le sexe ; "Toutes categories" + un groupe par entree de
+           _category_groups pour la categorie, valeur envoyee = categories
+           du groupe jointes par ";", libelle affiche = jointes par " + ")
+           - MASQUEE (via _sex_row/_cat_row.visible) tant que la case
+           globale correspondante n'est pas active (_refresh_restrict_
+           visibility). Contrairement aux free_texts (verrouilles pendant
+           l'affichage), ces combo box restent modifiables en direct et
+           repoussent immediatement (meme principe que intermediate_on) :
+           changer d'antenne pendant l'affichage est le but recherche,
+           pas une valeur figee au premier play.
+        3) restrict_to_sex/restrict_to_cat=false (defaut) : ce bouton n'est
+           JAMAIS concerne, quel que soit l'etat des cases globales -
+           bib_on ou non, INCHANGE par la correction ci-dessus.
+    _build() : has_restrict_selects = not bib_on and (restrict_to_sex or
+    restrict_to_cat) determine si ce bouton a besoin d'une box englobante
+    (au meme titre que bib_on/target_on/intermediate_on/free_texts) - ce
+    calcul n'a pas change (seule la condition d'ENVOI du champ dans
+    _build_payload a change, pas celle d'affichage de la combo box, deja
+    correcte des le depart).
+
+Rafraichissement instantane sur nouvelle donnee (BiathDataWebsocket.
+on_message()/remove_listener(), SceneButton._subscribe_to_new_data()) :
+au-dela du polling ui.timer(1.0, ...) deja en place pour les intermediaires
+et les formats de course (jusqu'a 1s de latence, largement suffisant en
+soi, mais quand meme perceptible), _handle_message() (biathdata_ws.py)
+notifie desormais une liste d'abonnes (callbacks synchrones sans argument)
+CHAQUE fois qu'un nouveau message complet (config+event_infos+timing_data)
+est traite avec succes - permet a l'UI de se rafraichir DES la reception,
+sans attendre le tick suivant. Un abonne qui leve une exception ne casse
+JAMAIS la boucle de reception (try/except autour de chaque callback,
+traceback affiche en console) - un bug d'affichage sur un bouton ne doit
+jamais empecher la reception des DONNEES suivantes pour tous les autres.
+PIEGE EVITE (pas un bug rencontre, anticipe des la conception) :
+BiathDataWebsocket est un SINGLETON partage par tous les clients/pages
+(un seul `data` en module-level dans main.py), alors que SceneButton est
+RECREE a chaque chargement de page (build_body s'execute par client). Un
+abonnement direct sans nettoyage accumulerait donc un callback
+supplementaire dans le registre PARTAGE a chaque rechargement de l'onglet
+navigateur, sans jamais retirer les anciens (fuite memoire + callbacks
+essayant de mettre a jour des elements deja detruits cote client,
+indefiniment). SceneButton._subscribe_to_new_data() evite ca en enregistrant
+AUSSI un ui.context.client.on_delete(...) qui desabonne automatiquement
+le callback quand CE client precis (cet onglet) est definitivement ferme.
+Utilise pour intermediate_on et race_formats ; le polling ui.timer reste
+en place dans les deux cas (filet de securite, coherent avec le pattern
+deja etabli ailleurs dans le fichier - connexion, etc.).
+
+Second CG (second_cg=<nom de template>, second_cg_layer=None par defaut) :
+declare un DEUXIEME graphique joue/stoppe/mis a jour EN MEME TEMPS que le
+template principal, sur le meme channel. IMPORTANT : second_cg_layer est
+un LAYER VIDEO (comme "layer" pour le principal), PAS un cg_layer
+d'empilement CG - omis, le second CG joue sur le MEME layer video que le
+principal (self.layer) ; precise, il joue sur CE layer video a lui, 2
+producers CasparCG totalement independants (donc visibles comme 2 layers
+distincts dans une INFO AMCP, par exemple). L'index d'empilement interne
+(parametre "cg_layer" de la commande AMCP CG ADD) est calcule par
+_second_cg_stack_layer() = self.cg_layer + 1 (TOUJOURS distinct de
+self.cg_layer, voir bug 3 de l'HISTORIQUE ci-dessous pour la raison).
+HISTORIQUE (4 iterations avant la version finale ci-dessus, a ne pas
+reproduire) :
+    1) D'abord, second_cg_layer a ete implemente comme le cg_layer du
+       second CG (les deux graphiques restant sur le MEME layer video que
+       le principal, juste empiles differemment). Rejete par l'utilisateur
+       apres verification des logs AMCP reels : les deux CG ADD
+       montraient bien la MEME adresse "channel-layer" (ex: "2-20"), ce
+       qui n'etait pas le comportement voulu.
+    2) Ensuite, un parametre SEPARE "second_layer" a ete ajoute pour
+       controler le layer video, en gardant "second_cg_layer" pour le
+       cg_layer d'empilement. Rejete aussi : l'utilisateur avait deja
+       utilise "second_cg_layer" dans son JSON en s'attendant a ce que CE
+       nom precis controle le layer video (coherent avec sa toute
+       premiere demande : "secondcg et second cg layer... pour indiquer
+       un deuxieme graphique"). D'ou la version finale : un seul
+       parametre, "second_cg_layer", qui EST le layer video.
+    3) Une fois "second_cg_layer" fixe comme layer video, l'index
+       d'empilement CG du second CG reutilisait encore self.cg_layer (le
+       MEME que le principal). Ca fonctionnait en direct au programme,
+       mais pas en passant par le preview au prealable ("ca marche bien
+       quand je l'envoie directement au pgm mais pas quand je passe au
+       prw d'abord"). Cause : format_address("prw", layer) (voir 4.3)
+       IGNORE le layer fourni et force TOUJOURS channel_preview-1 pour
+       TOUS les boutons - donc en preview, le principal et le second CG
+       visent la MEME adresse "channel-layer". Avec le MEME cg_layer en
+       plus, les deux CG ADD visaient exactement le meme
+       (adresse, cg_layer) : CasparCG remplace en place le producer
+       existant sur un CG ADD vers un (adresse, cg_layer) deja occupe (pas
+       besoin d'un REMOVE explicite) - le second CG ADD ecrasait donc
+       silencieusement le principal, qui disparaissait du preview. Fixe en
+       ajoutant _second_cg_stack_layer() = self.cg_layer + 1 (toujours
+       distinct de self.cg_layer), utilise comme argument cg_layer= dans
+       les 4 points d'appel du second CG au lieu de self.cg_layer.
+    4) Meme apres le fix precedent (cg_layer distinct en preview, donc les
+       DEUX producers coexistent bien visuellement en preview), le Take
+       restait casse : au Take, c'est le SECOND CG qui apparaissait au
+       programme, et le template PRINCIPAL disparaissait purement et
+       simplement (logs AMCP confirmes par l'utilisateur : apres les 2 CG
+       ADD en preview attendus, le Take n'envoyait au programme qu'un
+       "CG <adr> ADD 2 shootingrange" - jamais le template principal).
+       Cause reelle : CasparCG._preview (casparcg.py) etait un slot
+       UNIQUE pour toute l'appli (pas par bouton, pas par cg_layer) -
+       play_template() l'ecrasait a chaque play reussi vers "prw", sans
+       distinction. _play_second_cg() jouant le second CG EN PREVIEW juste
+       apres le principal (dans _play()), il ecrasait systematiquement le
+       suivi du principal avec ses propres infos (template="shootingrange",
+       cg_layer=second). play_prw_to_pgm(), appele par _take() pour
+       reprendre le principal, rejouait donc a chaque fois le SECOND CG
+       (avec le mauvais cg_layer en plus) a la place du principal, qui
+       n'etait jamais envoye au programme. Fixe en transformant
+       CasparCG._preview en dict{cg_layer: {...}} (un slot par cg_layer
+       au lieu d'un slot unique), et en donnant a play_prw_to_pgm(layer,
+       cg_layer) un parametre cg_layer explicite pour choisir LEQUEL des
+       producers previewes reprendre - _take() lui passe desormais
+       cg_layer=self.cg_layer (celui du principal), le second CG restant
+       rejoue separement comme avant via self._second_cg_payload.
+_second_cg_video_layer() est la seule fonction qui calcule ce layer
+effectif (second_cg_layer si precise, sinon self.layer), appelee partout
+ou le second CG est vise (_play_second_cg, _take, _stop, _update_data) -
+une seule source de verite plutot que de dupliquer le ternaire a chaque
+appel. Points d'implementation :
+    - _play_second_cg(channel, payload), appelee juste apres le succes du
+      play principal dans _play() : joue le second CG, et EN PREVIEW
+      seulement, memorise le payload dans self._second_cg_payload. Pour
+      le channel "prw", format_address() ignore de toute facon le layer
+      fourni et force toujours channel_preview-1 (voir 4.3) : la
+      distinction second_cg_layer/self.layer ne compte donc reellement
+      que pour le programme.
+    - _take() appelle play_prw_to_pgm(self.layer, cg_layer=self.cg_layer)
+      pour le principal (voir point 4 de l'HISTORIQUE - cg_layer precise
+      quel producer previewe reprendre parmi ceux suivis par
+      CasparCG._preview), PUIS rejoue le second CG a la main vers le
+      programme avec le payload memorise dans self._second_cg_payload :
+      play_prw_to_pgm() ne reprend qu'UN cg_layer a la fois, jamais les
+      deux automatiquement, donc le second CG doit toujours etre rejoue
+      separement par SceneButton.
+    - _stop() stoppe (CG STOP, meme animation de sortie) le second CG en
+      meme temps que le principal ; _update_data() pousse le meme payload
+      aux deux (et rafraichit self._second_cg_payload si en preview) ;
+      reset_to_idle() efface self._second_cg_payload.
+    - Echec du second CG (play/take/stop/update) : notifie une erreur
+      mais NE FAIT JAMAIS echouer l'action sur le template principal
+      (deja reussie a ce stade) - mieux vaut le graphique principal seul
+      qu'un echec total. Meme philosophie que le reste du fichier (stop()
+      qui echoue sur un STOP secondaire ne doit pas bloquer l'operateur).
+
+Un seul occupant a la fois par slot CasparCG, MAIS preview et programme
+suivent desormais exactement la MEME regle (multi-slot preview, voir
+8.11 pour l'historique du changement) :
+    - Preview : chaque bouton previse sur SON PROPRE (layer, cg_layer) -
+      SceneButton._active_preview est un dict indexe par (layer, cg_layer),
+      comme _active_pgm. Plusieurs boutons DIFFERENTS peuvent donc etre en
+      preview SIMULTANEMENT (chacun sur son propre layer), permettant de
+      pre-composer plusieurs graphiques avant de tous les envoyer au
+      programme d'un coup. Mettre un bouton en preview clear() (immediat,
+      sans animation) SEULEMENT son propre (layer, cg_layer) et remet a
+      idle (reset_to_idle()) le bouton qui l'occupait avant - les autres
+      slots de preview ne sont pas touches (SceneButton._claim_preview).
     - Programme : un (layer, cg_layer) donne ne peut avoir qu'un seul
       occupant (SceneButton._active_pgm, dict indexe par (layer,
       cg_layer)). Si un bouton est envoye au programme (play direct ou
@@ -653,12 +1454,59 @@ Un seul occupant a la fois par slot CasparCG partage entre boutons :
       footer, voir build_footer) stoppe tous les boutons actuellement au
       programme (appelle button._stop() sur chacun, meme mecanisme que le
       survol "OUT"), sans toucher a la preview.
-    - SceneButton.reset_preview_button() (utilise par le bouton CLEAR PRW
-      du footer) remet a idle le bouton qui occupe SceneButton
-      ._active_preview, sans envoyer de commande AMCP - a appeler APRES
-      un clear direct de caspar.clear("prw", ...) fait par l'appelant
-      (meme repartition des roles que caspar.emergency_all_out() +
-      SceneButton.reset_all() dans on_emergency_click).
+    - SceneButton.clear_all_previews() (async, utilise par le bouton CLEAR
+      PRW du footer) clear cote CasparCG CHAQUE layer de preview
+      actuellement suivi comme actif (le layer principal de chaque bouton
+      en preview, plus celui de son second_cg s'il est distinct), puis
+      remet chacun de ces boutons a idle - contrairement a l'ancien design
+      (un seul layer de preview partage, toujours clearable a l'aveugle),
+      ne clear QUE ce qui est suivi localement (un vrai desync, ex: apres
+      un redemarrage du process, necessite plutot emergency_all_out()).
+    - SceneButton.take_all_previews() (async, utilise par le bouton TAKE
+      PREVIEW du footer) fait un Take (_take()) sur CHAQUE bouton
+      actuellement en preview, pas un seul - "envoyer plusieurs graphiques
+      pre-composes au programme en meme temps" est le but explicite du
+      multi-slot.
+    - SceneButton.swap_preview_pgm() (async, utilise par le bouton SWAP du
+      footer) fait la meme chose que take_all_previews(), mais renvoie EN
+      PLUS en preview le graphique au programme echange avec chaque
+      preview (capture de son payload AVANT de le stopper). BUG REEL
+      RENCONTRE ET CORRIGE : apparier preview/pgm par (layer, cg_layer)
+      IDENTIQUE (comme _active_pgm/_active_preview sont indexes) ne
+      marche presque jamais en pratique, un swap se faisant normalement
+      entre deux boutons DIFFERENTS (types de graphiques differents, donc
+      layers differents) - resultat, le graphique au pgm restait en place
+      au lieu de repartir en preview. Corrige avec un appariement en 2
+      passes : d'abord un eventuel appariement EXACT par (layer,
+      cg_layer) (cas rare), puis les preview/pgm restants sont apparies
+      dans l'ordre - sans ambiguite avec un seul graphique de chaque cote
+      (usage typique). Un preview sans pgm a echanger est simplement pris.
+      AUTRE BUG REEL RENCONTRE ET CORRIGE : le second_cg de l'ancien
+      pgm_button (voir "Second CG" plus bas) n'etait pas renvoye en
+      preview, seul le template principal l'etait - le second_cg
+      disparaissait donc silencieusement, et _second_cg_payload restant
+      vide (efface par _stop()), un swap/Take suivant sur ce meme bouton
+      ne le rejouait plus jamais au programme. Corrige en renvoyant aussi
+      le second_cg en preview (meme payload, sur son propre layer/
+      cg_layer) et en remettant a jour pgm_button._second_cg_payload.
+
+Logs console (stdout) : SceneButton._log(message) affiche une ligne
+"[HH:MM:SS] [LABEL] message" pour CHAQUE action liee a un graphique -
+PLAY (preview/programme), TAKE, STOP, UPDATE, RESET, et leurs equivalents
+pour le second_cg, succes (avec le payload envoye pour PLAY/UPDATE) comme
+erreur. reset_to_idle() ne log QUE si le bouton n'etait pas deja idle
+(sinon reset_all(), qui l'appelle sur TOUS les boutons a chaque emergency
+all out, noierait la console). Les actions globales (reset_all/
+stop_all_pgm/clear_all_previews/take_all_previews/swap_preview_pgm)
+affichent EN PLUS une ligne resume ("=== ALL OUT : ... ===") avant
+d'agir sur chaque bouton individuellement (dont l'action est deja logee
+par son propre _stop()/_take()/reset_to_idle()). Timestampe a la seconde
+(comme l'horloge du header) pour rester facilement correlable avec les
+logs timestampes du serveur CasparCG cote AMCP. Utilise print() classique
+(pas le module logging) - coherent avec le reste du code (main.py/
+casparcg.py/biathdata_ws.py) et avec console=True dans le .spec
+PyInstaller (voir section 13), qui garde une fenetre de console visible
+precisement pour ce genre de logs en usage installe.
 
 Indicateur de connexion : une icone "warning" rouge apparait a droite du
 bouton (propre a chaque instance de SceneButton, verifiee chaque seconde
@@ -800,6 +1648,205 @@ pour la suite du developpement de l'interface :
     seulement depuis mi-2024) - a garder en tete si l'appli doit un jour
     tourner sur un navigateur different de Chrome/Edge.
 
+8.11 PIEGE MAJEUR / CHANGEMENT DE DESIGN - la preview a longtemps ete un
+    UNIQUE layer CasparCG partage par TOUS les boutons (format_address()
+    forcait "prw" a toujours cibler channel_preview-1, quel que soit le
+    layer passe). Ca a cause 2 bugs reels distincts avant d'etre change :
+      1) Le second CG d'un bouton (voir "Second CG" en section 7),
+         empile au-dessus du principal (cg_layer+1) sur ce meme layer
+         unique, le RECOUVRAIT visuellement des que son template n'etait
+         pas transparent sur toute la surface - seul le second CG restait
+         visible en preview ("seulement le second cg est affiche dans le
+         preview").
+      2) CasparCG._preview (casparcg.py) etait lui-meme un slot UNIQUE
+         pour toute l'appli (pas par bouton), ecrase par CHAQUE play()
+         reussi vers "prw" - jouer le second CG en preview juste apres le
+         principal effacait donc le suivi du principal, et le Take
+         reprenait le SECOND CG a la place du principal (voir HISTORIQUE
+         point 4 de la section "Second CG" en 7).
+    Plutot que rafistoler ces 2 symptomes independamment, le design a ete
+    change a la racine, a la demande explicite de l'utilisateur : la
+    preview suit maintenant EXACTEMENT la meme regle que le programme -
+    chaque bouton previse sur SON PROPRE (layer, cg_layer), comme au
+    programme (format_address() exige desormais un layer explicite pour
+    "prw" ET "pgm", plus de cas special). Consequences :
+      - CasparCG._preview est passe de dict{cg_layer: {...}} (deja
+        corrige une fois, voir HISTORIQUE point 4 en section 7) a
+        dict{(layer, cg_layer): {...}} - un slot par layer ET cg_layer.
+      - clear(channel="prw", layer=X) ne vide plus tout le suivi
+        _preview, seulement les entrees dont le layer == X (les autres
+        boutons en preview sur d'autres layers ne sont plus impactes).
+      - play_prw_to_pgm(layer, cg_layer) cible desormais un (layer,
+        cg_layer) precis au lieu d'un cg_layer seul.
+      - SceneButton._active_preview est passe de "un seul bouton (ou
+        None)" a dict[(layer, cg_layer), SceneButton] - meme forme que
+        _active_pgm.
+      - CONSEQUENCE PRODUIT VOULUE : plusieurs boutons DIFFERENTS peuvent
+        desormais etre en preview SIMULTANEMENT (chacun sur son propre
+        layer), ce qui permet de PRE-COMPOSER plusieurs graphiques avant
+        de tous les envoyer au programme d'un coup - c'est le but
+        explicite de ce changement, pas un effet de bord. Les boutons
+        CLEAR PRW / TAKE PREVIEW / SWAP du footer ont ete adaptes en
+        consequence pour agir sur TOUS les slots de preview actifs au
+        lieu d'un seul (voir SceneButton.clear_all_previews/
+        take_all_previews/swap_preview_pgm, section 7).
+      - _take() doit desormais explicitement clear() le layer de preview
+        du second CG s'il differe du layer principal (play_prw_to_pgm ne
+        clear que self.layer) - sinon il resterait visible en preview
+        alors qu'il est deja repris au programme.
+    A NE PLUS FAIRE : revenir a un design "un seul layer de preview
+    partage" pour "simplifier" - c'est precisement la source des 2 bugs
+    ci-dessus, et la pre-composition multi-graphiques est une fonctionnalite
+    explicitement demandee, pas un detail d'implementation.
+
+8.12 PIEGE MAJEUR - element.make_sortable() (SortableJS, *NiceGUI 3.11+*)
+    NE FONCTIONNE PAS a l'interieur d'un contenu TELEPORTE par Vue -
+    concretement, ni dans un ui.dialog() (QDialog), ni dans un ui.menu()
+    (QMenu). Rencontre en implementant le glisser-deposer du regroupement
+    des categories (voir section 7 "Restriction par sexe/categorie") :
+    l'utilisateur rapportait "je ne peux pas deplacer les categories...
+    ca selectionne le texte", puis apres un premier correctif (select-none,
+    necessaire mais insuffisant, voir plus bas) "ca ne marche toujours pas
+    je n'arrive pas a les drag and drop malgres que l'icone du pointeur me
+    dit que je peux le faire" - symptome qui a demande une INVESTIGATION
+    APPROFONDIE (protocole DevTools de Chrome, evenements souris simules
+    "trusted" via Input.dispatchMouseEvent - indiscernables d'une vraie
+    souris - pour eliminer un simple probleme de simulation de test) avant
+    de trouver la vraie cause.
+
+    SYMPTOME PRECIS : aucune erreur JS (verifie via Runtime.exceptionThrown/
+    Log.entryAdded sur toute la duree du chargement de page), le module
+    "nicegui-sortable" s'importe sans probleme, Sortable.create() reussit
+    (renvoie une instance non-nulle, testable manuellement via
+    Runtime.evaluate), mais le glisser-deposer ne se declenche JAMAIS -
+    verifie avec une vraie sequence mousePressed/mouseMoved (par petits pas,
+    avec delais)/mouseReleased. Le curseur CSS (cursor-move) s'affiche
+    normalement au survol (raison du "l'icone me dit que je peux le
+    faire" rapporte par l'utilisateur) car c'est un pur effet CSS, sans
+    rapport avec le fonctionnement reel du JS.
+
+    PISTES ELIMINEES UNE PAR UNE (chacune testee empiriquement, aucune n'a
+    resolu le probleme) :
+        1) select-none manquant sur les puces -> CORRIGE (necessaire,
+           piege reel independant : sans lui, un mousedown-drag sur le
+           TEXTE d'une puce est intercepte par le navigateur comme une
+           selection de texte plutot que de declencher SortableJS -
+           select-none seul suffit HORS d'un dialogue/menu, voir plus bas)
+           mais PAS suffisant a lui seul pour le probleme rapporte ensuite.
+        2) Timing/DOM pas encore rendu - repousser make_sortable() a la
+           premiere ouverture confirmee du dialogue (dialog.on_value_change)
+           + un delai supplementaire de 300ms (ui.timer) : AUCUN EFFET.
+        3) Mode "fallback" force (options={"forceFallback": True}, evite
+           l'API HTML5 drag native au profit d'un suivi souris JS pur, au
+           cas ou le natif serait bloque par le modal) : AUCUN EFFET.
+        4) Prop Quasar "seamless" sur le dialogue (retire completement le
+           comportement modal/backdrop) : AUCUN EFFET.
+        5) ui.menu() a la place de ui.dialog() (composant Quasar different,
+           avec une logique d'evenements differente - eliminait une cause
+           SPECIFIQUE a QDialog comme un gestionnaire "clic exterieur pour
+           fermer") : MEME ECHEC.
+
+    CAUSE REELLE IDENTIFIEE (par elimination + comparaison controlee) :
+    le POINT COMMUN entre ui.dialog() et ui.menu() (tous deux casses) est
+    que Quasar rend leur contenu via le <Teleport> de Vue (deplace
+    ailleurs dans le DOM - typiquement vers document.body - que sa
+    position logique dans l'arbre de composants). Une simple ui.column
+    basculee par .visible (PAS de Teleport) avec EXACTEMENT le meme code
+    de glisser-deposer (meme sans aucun des correctifs 2-4 ci-dessus, y
+    compris SANS delai) fonctionne PARFAITEMENT du premier coup - verifie
+    plusieurs fois de suite avec le meme protocole de test. make_sortable()
+    est donc incompatible avec du contenu teleporte, pour une raison non
+    identifiee avec certitude au niveau du mecanisme exact (hypothese : le
+    controleur Sortable invisible est place via `with self.client.layout:`
+    - donc PAS teleporte, TOUJOURS enfant "normal" de l'arbre - alors que
+    l'element qu'il pilote, LUI, peut l'etre ; un decalage entre ID DOM et
+    resolution d'evenements/coordonnees pourrait en decouler, mais ce n'est
+    pas confirme au niveau du code source de nicegui-sortable/SortableJS).
+
+    SOLUTION RETENUE : ne JAMAIS mettre du contenu avec make_sortable() a
+    l'interieur d'un ui.dialog()/ui.menu(). Le panneau de regroupement des
+    categories (voir section 7) N'EST PAS un vrai ui.dialog()/ui.menu(),
+    mais une ui.column basculee par .visible, STYLISEE pour ressembler a
+    une boite de dialogue (classes Tailwind "fixed inset-0 z-50
+    items-center justify-center bg-black/50" + une ui.card centree a
+    l'interieur) sans en etre une techniquement - contourne le piege tout
+    en gardant l'apparence attendue d'un dialogue modal. Ouvert/ferme
+    depuis un bouton dans la VRAIE boite de dialogue Parametres (qui se
+    ferme d'abord), pas de glisser-deposer entre les deux, un seul visible
+    a la fois.
+
+    A NE PLUS FAIRE : re-essayer de mettre make_sortable() dans un
+    ui.dialog()/ui.menu() "parce que ca devrait marcher en theorie" (deja
+    teste exhaustivement, toutes les pistes correctives usuelles echouent) -
+    utiliser systematiquement le pattern "ui.column + .visible stylise en
+    faux dialogue" pour tout futur besoin de glisser-deposer dans une
+    boite modale.
+
+8.13 PIEGE - une icone "voisine flex" (items-start) d'un bouton se
+    retrouve EPINGLEE EN HAUT d'une box agrandie, pas centree sur le
+    bouton (scene_button.py, corrige suite a une demande explicite :
+    "pour les logos d'attention a cote des boutons, les centrer en
+    hauteur par rapport au bouton").
+    L'icone d'alerte de connexion (_build_connection_warning) etait
+    construite comme un simple ELEMENT VOISIN du bouton dans une
+    ui.row().classes("items-start gap-2") au niveau de _build() - correct
+    tant que le bouton n'a RIEN en dessous, mais des que bib_on/target_on/
+    intermediate_on/free_texts ajoutent des champs sous le bouton (le tout
+    regroupe dans une "box" plus haute que le bouton seul), "items-start"
+    aligne l'icone sur le HAUT DE LA BOX ENTIERE (correct visuellement,
+    mais pas ce qu'on veut : l'icone doit rester au niveau du bouton,
+    quelle que soit la hauteur du reste en dessous).
+    SOLUTION (deja appliquee a l'icone de format indisponible, _build_
+    format_warning, AVANT ce correctif - la meme technique a simplement
+    ete etendue a l'icone de connexion) : construire l'icone A L'INTERIEUR
+    du conteneur "relative" du bouton lui-meme (dans _build_button(), PAS
+    dans _build()), positionnee en absolu ("absolute left-full top-1/2
+    -translate-y-1/2") - le positionnement se calcule alors par rapport
+    AU BOUTON SEUL (le plus proche ancetre "relative"), completement
+    independant de ce qui est empile en dessous dans la box englobante.
+    Les 2 icones (connexion + format) partagent maintenant un seul
+    conteneur ui.row absolu commun (au lieu de 2 positionnements absolus
+    separes) pour ne jamais se chevaucher quand les deux sont visibles en
+    meme temps (ex: deconnecte ET mauvais format de course) - le conteneur
+    porte le positionnement, les icones elles-memes ne gardent que leur
+    style propre (couleur/taille/curseur).
+    A NE PAS CONFONDRE avec _intermediate_warning_icon ("Selectionnez un
+    intermediaire"), volontairement laissee au niveau de la combo box
+    d'intermediaire (pas du bouton) : cet avertissement concerne
+    specifiquement CE champ-la, pas le bouton dans son ensemble.
+
+    SUITE IMMEDIATE (interface.py) : les icones ci-dessus etant en
+    ABSOLU, elles debordent de leur propre cellule de grille CSS - avec
+    l'ancien gap-4 uniforme (16px) entre colonnes, ce debordement (jusqu'a
+    ~64px quand les 2 icones sont visibles en meme temps) chevauchait le
+    bouton de la colonne suivante. D'ABORD corrige en elargissant le gap
+    de grille ENTIER (gap-x-20 uniforme, 80px) - fonctionnait, mais
+    ecartait TOUS les boutons meme ceux qui n'ont jamais d'icone.
+
+    AFFINE ENSUITE (demande explicite : "si il n'y a pas d'icone d'erreur
+    entre les boutons, faire en sorte que les boutons soient plus
+    proches") : la grille est REVENUE a un gap-4 uniforme et modeste
+    (16px), et c'est desormais CHAQUE BOUTON qui reserve (ou non) sa
+    propre place via SceneButton._refresh_warning_spacing() - une marge
+    "mr-20" (80px) ajoutee sur le conteneur du bouton (_button_container,
+    memorise a la construction) UNIQUEMENT si au moins une des 2 icones
+    (connexion/format) est actuellement visible, "mr-0" sinon. Appelee par
+    les 2 fonctions qui changent une visibilite (_refresh_format_
+    availability/_refresh_connection_warning), jamais l'inverse - chacune
+    ne connait que son propre etat, cette fonction combine les deux.
+    Consequence acceptee : `grid-auto-columns: max-content` dimensionne
+    une colonne entiere sur son contenu le plus large, donc si UNE SEULE
+    ligne de cette colonne a une icone, TOUTE la colonne s'elargit un peu
+    (les autres lignes de la meme colonne ne "recuperent" pas cet espace)
+    - limitation inherente a CSS Grid (impossible de varier le gap entre
+    des paires de colonnes precises), acceptable et conforme a l'esprit de
+    la demande (granularite par colonne, pas par ligne individuelle).
+    Verifie visuellement ET par mesure DOM (protocole DevTools de Chrome) :
+    27.6px entre 2 boutons sans aucune icone contre 123.6px entre 2
+    boutons dont l'un affiche une icone de format indisponible - le ratio
+    correspond exactement a la marge mr-20 ajoutee (aux arrondis du
+    facteur BODY_ZOOM pres, voir section 6.2).
+
 
 9. CONFIGURATION / VALEURS DE TEST UTILISEES
 -------------------------------------------------
@@ -924,6 +1971,160 @@ Avant de modifier le code, une IA doit :
   nombre de machines/operateurs).
 
 
+
+12bis. INTEGRATION STREAM DECK (Elgato Stream Deck XL)
+--------------------------------------------------------
+Materiel REELLEMENT teste tout au long du developpement (Stream Deck XL,
+32 touches, 8 colonnes x 4 lignes, branche en USB) - toutes les
+verifications ci-dessous ont ete faites sur le vrai peripherique, pas
+seulement en logique pure.
+
+V1 -> V2, CHANGEMENT DE PHILOSOPHIE (demande explicite de l'utilisateur,
+apres une premiere version qui permettait de lancer des graphiques depuis
+le Stream Deck) : "retirer les graphique du stream deck je ne veux pas
+les lancer avec le stream deck". Le Stream Deck NE LANCE PLUS AUCUN
+GRAPHIQUE - il sert desormais uniquement a :
+    1) taper un dossard/une cible dans une boite de dialogue DEJA OUVERTE
+       A LA SOURIS depuis l'interface web (_ask_bib/_ask_target) ;
+    2) a defaut de boite ouverte, mettre a jour EN DIRECT le dossard/la
+       cible du DERNIER graphique joue/pris DEPUIS L'INTERFACE WEB, qu'il
+       soit en preview ou a l'antenne ;
+    3) tourner les pages de ce meme dernier graphique, s'il est
+       multipage_on (GOTO PAGE 1/PRECEDENTE/SUIVANTE) ;
+    4) les actions globales du footer (ALL OUT/CLEAR PRW/TAKE PREVIEW/
+       SWAP), identiques a celles de l'interface web (memes methodes de
+       classe, aucune reimplementation).
+
+PIEGES MAJEURS RENCONTRES ET CONTOURNES (voir streamdeck_hid.py et
+streamdeck_controller.py pour le detail complet) :
+    - Absence de hidapi.dll sur Windows : le package pip "streamdeck"
+      (bibliotheque officielle) leve ProbeError des sa construction, MEME
+      Stream Deck branche, car son seul transport reel charge un DLL natif
+      qu'aucun package pip Windows ne fournit. SOLUTION : streamdeck_hid.py
+      implemente un transport maison par-dessus le module `hid` (package
+      pip "hidapi" de Trezor/cython-hidapi - DIFFERENT package pip du
+      package "streamdeck" lui-meme), qui embarque hidapi dans son
+      extension Cython compilee et fonctionne immediatement.
+    - ui.notify() (et tout ce qui touche nicegui.context) hors d'une tache
+      rattachee a un client NiceGUI leve RuntimeError - une touche
+      physique n'est PAS un clic navigateur. SOLUTION : SceneButton.client
+      (memorise a la construction) permet de re-entrer le contexte du
+      client proprietaire via `with button.client:` avant tout appel
+      touchant ce bouton, en plus d'un garde-fou try/except global
+      (on_key_change) qui empeche de toute facon qu'une erreur d'affichage
+      n'interrompe la lecture des touches physiques.
+    - PIEGE DE TEST (pas un bug du logiciel, une lecon de methodologie) :
+      ouvrir une boite de dialogue via asyncio.create_task() depuis un
+      script de test EXTERIEUR a tout gestionnaire d'evenement NiceGUI
+      reproduit artificiellement l'erreur "slot stack empty" ci-dessus,
+      MEME quand le code de production n'a pas ce probleme (un vrai clic
+      navigateur reste dans la meme tache du debut a la fin, y compris
+      pendant l'attente `await dialog`). Verifie en cliquant reellement
+      (protocole DevTools de Chrome, clic simule sur l'icone crayon d'un
+      bouton reel) plutot qu'en simulant l'ouverture par du code Python
+      artificiel - seule facon fiable de tester ce genre de flux.
+
+DISPOSITION DES 32 TOUCHES (voir streamdeck_controller.py pour le schema
+ASCII exact et les constantes KEY_*) - LE PAVE NUMERIQUE EST A DROITE
+(corrige apres un premier essai a gauche - demande explicite : "met la
+pave a droite, je veux colle au pave les bouton relatif au pave et
+ensuite tu met a gauche le reste des bouton") :
+    - Pave numerique (colonnes 5-7, 12 touches) : disposition CLAVIER
+      D'ORDINATEUR (7 8 9 en haut, 4 5 6 au milieu, 1 2 3 en bas - PAS
+      telephone/calculatrice, corrige apres un premier essai dans ce sens)
+      + EFFACER/0/VALIDER en bas.
+    - 3 touches de mode, COLLEES contre le pave (colonne 4, immediatement
+      a gauche) : DOSSARD/CIBLE (bascule le mode du pave - servent AUSSI
+      d'ECRAN, aucune touche dediee disponible sur les 32 : affichent le
+      nombre en cours de saisie ou la derniere valeur EFFECTIVEMENT
+      appliquee, voir streamdeck_icons.render_mode_bib/render_mode_target)
+      et CLEAR CIBLE (efface directement la cible du dernier graphique
+      actif, sans repasser par une saisie).
+    - Le reste (colonnes 0-3, plus loin a gauche) : PAGE 1/PRECEDENTE/
+      SUIVANTE (ligne du haut) et les 4 actions du footer web (ligne du
+      bas, colonnes 0-3) + SPONSOR IN (ligne du bas, colonne 4 - demande
+      explicite ulterieure, ajoutee juste a droite de SWAP dans la meme
+      case auparavant inutilisee) - SceneButton.invoke_all_pgm(
+      "sponsor_in"), EXACTEMENT le meme appel que le bouton SPONSOR IN de
+      l'interface web (aucune reimplementation), voir section 4.4/7 pour
+      le detail de CG INVOKE.
+    - 9 touches inutilisees (fond noir uni, streamdeck_icons.render_empty).
+
+PRIORITE DU PAVE NUMERIQUE (_on_digit/_on_clear_entry/_on_validate,
+streamdeck_controller.py) : un chiffre va TOUJOURS en priorite vers une
+boite de dialogue actuellement ouverte a la souris
+(SceneButton._active_streamdeck_input, voir plus bas), quel que soit le
+mode DOSSARD/CIBLE en cours - la boite de dialogue represente une
+intention explicite et immediate de l'operateur, prioritaire sur l'etat
+du pave. A defaut de boite ouverte, retombe sur le flux DOSSARD/CIBLE
+(mise a jour du dernier graphique actif).
+
+scene_button.py - 3 ajouts pour cette integration :
+    - StreamDeckInputTarget (dataclass module-level) + SceneButton.
+      _active_streamdeck_input (class attr) : pont generique entre le pave
+      du Stream Deck et N'IMPORTE QUELLE boite de dialogue ouverte a la
+      souris. _ask_bib() (champ de RECHERCHE, pas un champ numerique pur -
+      un chiffre tape via le Stream Deck filtre la liste d'athletes comme
+      le ferait une saisie clavier normale) et _ask_target() (ui.number)
+      s'enregistrent ici a l'ouverture (avec des callbacks append_digit/
+      clear/submit fermees sur LEUR PROPRE widget - deux formes de champ
+      differentes, d'ou cette petite abstraction commune) et se
+      desenregistrent dans un bloc finally, quelle que soit la maniere
+      dont la boite se ferme (Annuler, Valider, ou meme une exception).
+      set_value() (PAS une simple affectation) pour rester coherent avec
+      les listeners on_change existants (meme piege que le "+"/"-" de
+      free_text, voir plus haut dans ce fichier).
+    - SceneButton._last_active (class attr) : dernier bouton joue/pris
+      DEPUIS L'INTERFACE WEB (mis a jour dans _play() ET _take(), PAS
+      juste _play() - _take() peut faire passer un bouton en programme
+      sans un nouveau _play()). Le Stream Deck agit sur CELUI-CI pour ses
+      actions DOSSARD/CIBLE (via _update_data(), la MEME fonction que
+      l'icone crayon de l'interface web - aucune reimplementation) et sa
+      pagination (_goto_first_page(), nouvelle methode miroir de
+      _on_next_page()/_on_prev_page() deja existantes).
+    - _goto_first_page() : identique en structure a _on_next_page()/
+      _on_prev_page() (verifie _is_format_available(), ne fait rien si
+      deja page 1, sinon repositionne + _update_data() si pas idle) - la
+      seule difference etant qu'aucune fleche dediee n'existe cote
+      interface web pour ce saut direct (uniquement utile depuis le
+      Stream Deck, qui n'a que 3 touches de navigation contre les 2
+      fleches gauche/droite du web).
+
+CORRECTION IMPORTANTE (par rapport a la toute premiere iteration de cette
+integration, qui autorisait le lancement de graphiques) : SceneButton.
+_play() a ete REMISE A SA SIGNATURE D'ORIGINE (les parametres preset_bib/
+preset_target ajoutes pour cette V1 ont ete retires, plus aucun appelant
+n'en avait besoin une fois le lancement retire du Stream Deck) - eviter le
+code mort/parametres inutilises plutot que de les laisser trainer "au cas
+ou".
+
+Teste de bout en bout sur le MATERIEL REEL (protocole DevTools de Chrome
+pour simuler de vrais clics navigateur, routes HTTP dediees dans un
+serveur de test pour declencher des touches Stream Deck a la demande,
+CasparCG remplace par un faux objet enregistrant les appels) :
+    - Rendu confirme visuellement par l'utilisateur a plusieurs reprises
+      (disposition initiale, puis apres inversion gauche/droite du pave).
+    - Saisie dans une boite de dialogue OUVERTE A LA SOURIS (clic reel sur
+      l'icone crayon d'un bouton target_on) : EFFACER puis 1-4 tapes sur
+      le Stream Deck -> champ affichant "14" dans le DOM reel, VALIDER ->
+      self._target == 14 sur le bon bouton, _active_streamdeck_input bien
+      revenu a None apres fermeture.
+    - Mise a jour EN DIRECT du dossard d'un graphique A L'ANTENNE, lance
+      depuis l'interface web (clic reel : selection d'un athlete, IN, IN
+      a nouveau pour le Take) : DOSSARD puis 9-9 sur le Stream Deck ->
+      caspar.update_template("pgm", {"bib": "99", ...}, ...) envoye, bib
+      du bouton mis a jour de "7" a "99".
+    - Pagination d'un bouton multipage_on last_active (clic reel sur un
+      bouton START LIST) : NEXT_PAGE x2 -> page 1 -> 3 (avec un CG UPDATE
+      a chaque etape puisqu'en preview), puis GOTO_PAGE1 -> retour a la
+      page 1.
+    - Touche SPONSOR IN (ajoutee ulterieurement) : clic reel (IN, IN) sur
+      un bouton pour le prendre a l'antenne, puis appui reel sur la
+      touche du Stream Deck -> caspar.invoke_template("pgm", "sponsor_in",
+      layer=10, cg_layer=1) recu, sur le bon layer/cg_layer du bouton
+      alors au programme.
+
+
 13. COMPILATION EN EXECUTABLE (PyInstaller / auto-py-to-exe)
 ------------------------------------------------------------------
 
@@ -962,6 +2163,46 @@ sans changement manuel entre les deux.
     app_config.py (CONFIG_PATH) passent tous les trois par paths.py -
     aucun ne construit plus son propre chemin via Path(__file__)
     directement (verifie : seul paths.py y fait encore reference).
+
+    BUG REEL RENCONTRE ET CORRIGE - "pourquoi quand je compile le
+    logiciel je n'ai pas tous les boutons qui apparaissent ?" :
+    consequence DIRECTE du "sans jamais ecraser" d'ensure_user_file()
+    ci-dessus, VOULU pour proteger les options de free_text ajoutees en
+    direct par l'operateur, mais qui a un effet de bord non voulu : une
+    fois le tout premier lancement passe, la copie utilisateur de
+    templates.json reste figee pour toujours, MEME apres avoir recompile
+    une version plus recente du logiciel avec de nouveaux boutons ajoutes
+    au templates.json source - la copie deployee (%APPDATA%) ne les
+    voit jamais. Corrige dans buttons_config.py (PAS dans ensure_user_file()
+    lui-meme, qui reste generique - ce fichier connait la STRUCTURE de
+    templates.json, paths.py non) : merge_bundled_templates(bundled, user)
+    complete la copie utilisateur avec les entrees du templates.json
+    EMBARQUE dans l'executable qui n'y sont pas deja, identifiees de
+    facon stable par _entry_identity() - (template, layer, cg_layer) pour
+    un vrai bouton (ce qui est REELLEMENT envoye a CasparCG, un simple
+    "label" ne suffit pas car 2 boutons differents peuvent le partager),
+    (section, column) pour les entrees "_column_title"/"_restrict_controls".
+    PUREMENT ADDITIF : n'ecrase JAMAIS une entree deja presente cote
+    utilisateur (ses eventuelles options de free_text ajoutees en direct
+    restent intactes), et ne RETIRE JAMAIS une entree presente cote
+    utilisateur mais absente cote embarque (un bouton personnalise ajoute
+    par l'operateur lui-meme, ou un bouton retire dans une version plus
+    recente, ne doit jamais disparaitre du jour au lendemain).
+    _merge_bundled_templates_on_startup() execute cette fusion UNE SEULE
+    FOIS a l'import du module (donc au tout premier chargement de page),
+    UNIQUEMENT si FROZEN (en developpement, resource_path() et
+    user_data_path() pointent vers le MEME fichier, une fusion n'y aurait
+    aucun sens) - jamais fatal, un templates.json embarque manquant ou
+    invalide ne bloque jamais le demarrage (try/except large, le logiciel
+    continue simplement avec la copie utilisateur telle quelle).
+    Teste de bout en bout (fichiers de scratch, resource_path/
+    user_data_path/FROZEN monkeypatches - jamais le vrai templates.json) :
+    un bouton nouveau cote "bundled" est bien ajoute cote "user" ; un
+    bouton deja present AVEC une personnalisation (option de free_text)
+    reste inchange ; un bouton purement personnalise cote "user" (absent
+    du "bundled") survit ; un deuxieme appel sans rien de nouveau est un
+    no-op strict (fichier byte-a-byte identique, aucune reecriture
+    inutile).
 
 13.2 BiathControlCenter.spec - configuration PyInstaller
     A compiler avec `pyinstaller BiathControlCenter.spec` (plus fiable et
@@ -1009,6 +2250,17 @@ sans changement manuel entre les deux.
     dans l'environnement de developpement au moment de ce travail :
     PyInstaller 6.11.1, auto-py-to-exe 2.45.0), pas des dependances de
     l'application elle-meme - volontairement absents de requirements.txt.
+    Ajoute avec l'integration Stream Deck (voir section 12bis) : streamdeck
+    (python-elgato-streamdeck, bibliotheque officielle - fournit les
+    classes StreamDeckXL/PILHelper/etc., mais PAS le transport HID
+    fonctionnel sous Windows, voir streamdeck_hid.py), hidapi (package pip
+    de Trezor/cython-hidapi, module `hid` - fournit le VRAI acces materiel
+    sous Windows, contrairement a ce que son nom pourrait suggerer pour le
+    package "streamdeck" seul), Pillow (dessin des icones, streamdeck_
+    icons.py). A verifier avant compilation PyInstaller (section 13.4) :
+    ces 3 packages (extensions compilees pour hidapi/Pillow) doivent etre
+    correctement embarques - pas seulement testes en environnement de
+    developpement.
 
 13.4 Non verifie / a tester
     Aucune compilation reelle n'a ete effectuee pendant ce travail (pas
